@@ -26,9 +26,12 @@ const PACKAGE_ROOT = fileURLToPath(new URL('../', import.meta.url))
 const ENG_PRESET = join(PACKAGE_ROOT, 'presets', 'eng')
 
 /**
- * 本包相对上游 standard 的有意差异。eng 只做加法与一处调参：
+ * 本包相对上游 standard 的有意差异。eng 只做加法、一处调参，和本 fork 的
+ * 一条部署侧行覆盖：
  * - 三个预设本地插件行（eng 独有）；
- * - tool-result-pruner 的阈值放大到 2 倍，上游值由下方 pruner 常量描述。
+ * - tool-result-pruner 的阈值放大到 2 倍，上游值由下方 pruner 常量描述；
+ * - `tool-subagent` 行多一个 `disabled: true`（本 fork 的部署 delta，
+ *   由下方 ROW_OVERRIDES 声明）。
  */
 const EXTRA_ENG_ROWS = [
   "tool-wait-subagent -> ./plugins/wait-subagent/index.js",
@@ -41,6 +44,17 @@ const PRUNER_OVERRIDES = new Map([
   ['16384', '8192'],
   ['8192', '4096'],
   ['2048', '1024'],
+])
+
+/**
+ * 有意覆盖的上游行配置：rowId → (键 → 上游该键的值)。只有本 fork 的
+ * 部署侧 delta 能进这张表，纯调参仍走 PRUNER_OVERRIDES。上游没有的键写成
+ * undefined——声明本身就是"这里是相对上游的差异，且差异已知"。
+ */
+const ROW_OVERRIDES = new Map([
+  // 部署侧另一个插件接管 `subagent` 工具名；preset 作用域遮蔽全局注册，
+  // 故官方通用行必须让出该名字（上游无 `disabled` 键）。
+  ['tool-subagent', new Map([['disabled', undefined]])],
 ])
 
 /**
@@ -173,9 +187,14 @@ test('eng 预设的行与上游 standard 对齐，差异只有白名单', (t) =>
     for (const [key, value] of config) {
       const upstreamValue = reference.get(key)
       if (upstreamValue === value) continue
-      const declared = PRUNER_OVERRIDES.get(value)
-      assert.equal(declared, upstreamValue,
-        `${id}.${key} 与上游不同且未声明：eng=${value} upstream=${upstreamValue}`)
+      // 声明优先：行级（新增或覆盖某个键）在 ROW_OVERRIDES，纯调参在 PRUNER_OVERRIDES。
+      const rowOverride = ROW_OVERRIDES.get(id)
+      if (rowOverride !== undefined && rowOverride.has(key) && rowOverride.get(key) === upstreamValue) continue
+      if (PRUNER_OVERRIDES.has(value) && PRUNER_OVERRIDES.get(value) === upstreamValue) continue
+      // 没有匹配声明就是漂移。不得退回 `assert.equal(declared, upstreamValue)`：
+      // 新增的键其上游值是 undefined，`undefined === undefined` 会静默通过
+      // （2026-09-12 在本 fork 上实测到该盲点），于是"加一行配置"就能骗过自检。
+      assert.fail(`${id}.${key} 与上游不同且未声明：eng=${value} upstream=${String(upstreamValue)}`)
     }
   }
 })

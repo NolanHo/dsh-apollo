@@ -204,8 +204,13 @@
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
 
+    # 本 fork 的部署侧 delta（tests/upstream-drift.test.mjs 的 ROW_OVERRIDES
+    # 同步声明）：本机另一个插件接管 `subagent` 工具名并提供 role 工具与
+    # model 白名单；preset 作用域会遮蔽全局注册，故官方通用行必须让出该名字。
+    # 上游无此键——这是本 fork 相对上游 standard 唯一的行配置差异。
     - id: tool-subagent
       name: '@deepseek-ai/dsh-tool-subagent'
+      disabled: true
       config:
         provider: spawn
         toolName: subagent
