@@ -151,9 +151,13 @@ window.__ModuleLoader__.load({
 			ok: { color: 'var(--dsw-alias-state-success-primary, #3c3)', fontSize: '13px' },
 			error: { color: 'var(--dsw-alias-state-error-primary, #c33)', fontSize: '13px' },
 			card: { display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '13px', color: 'var(--dsw-alias-label-primary, inherit)' },
-			cardHead: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
-			cardTitle: { fontWeight: 600 },
-			cardMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px' },
+			// 折叠头：与工具行同构的一行——状态点、工具名、摘要、右端箭头。
+			rowHead: { display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '2px 0', border: 'none', background: 'transparent', color: 'inherit', font: 'inherit', cursor: 'pointer', textAlign: 'left' },
+			rowTitle: { fontWeight: 600, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px' },
+			rowSummary: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 },
+			rowChevron: { marginLeft: 'auto', color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '11px' },
+			body: { display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '4px' },
+			dotError: { color: 'var(--dsw-alias-state-error-primary, #c33)', fontSize: '10px' },
 			waitRow: { display: 'flex', flexDirection: 'column', gap: '2px' },
 			waitRowHead: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 },
 			waitLabel: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '260px' },
@@ -553,11 +557,17 @@ window.__ModuleLoader__.load({
 			// 空目录，卡照常按 id 渲染。
 			const entries = childEntries(catalogFrom(props?.useSessions) ?? NO_CATALOG, sessionId);
 			const [feeds, setFeeds] = useState({});
+			// 折叠态：与通用工具行一致，默认收起。收起时只有一行摘要，不订阅、不渲染
+			// 实时行——展开才是这张卡的全部内容（也正是它存在的理由）。
+			const [open, setOpen] = useState(false);
 			// key → AbortController：当前活着的流。ref 而非 state——abort 句柄不进渲染。
 			const activeStreams = useRef(new Map());
 			const [now, setNow] = useState(() => Date.now());
 			const waiting = !settled && waited.ids.length > 0 && sessionId !== undefined;
-			const targets = waiting
+			// 收起时不开流：既符合"折叠不动"的语义，也避免为从不展开的卡付整段子代理
+			// 日志的快照代价（子代理地址没有有界窗口，见 README 已知限制）。
+			const streaming = waiting && open;
+			const targets = streaming
 				? waited.ids.map((id) => ({ parentSessionId: sessionId, childSessionId: id, mode: entryMode(entries.get(id)) }))
 				: [];
 			// 流的身份 = 整份目标清单（父/子/mode）。用字符串做 effect 依赖：目录快照
@@ -677,7 +687,7 @@ window.__ModuleLoader__.load({
 				activeStreams.current.clear();
 			}, []);
 
-			const liveUnavailable = waiting && !followAvailable;
+			const liveUnavailable = streaming && !followAvailable;
 
 			const renderRow = (id) => {
 				const entry = entries.get(id);
@@ -718,12 +728,12 @@ window.__ModuleLoader__.load({
 			};
 
 			const children = [];
+			const title = typeof props?.toolName === 'string' && props.toolName !== '' ? props.toolName : 'wait_subagent';
 			const headTitle = waited.ids.length > 0
 				? text(settled ? 'waitTitleSettled' : 'waitTitleRunning', { n: waited.ids.length })
-				: typeof props?.toolName === 'string' && props.toolName !== '' ? props.toolName : 'wait_subagent';
-			children.push(h('div', { key: 'head', style: styles.cardHead },
-				h('span', { style: styles.cardTitle }, headTitle),
-				waited.truncated > 0 ? h('span', { style: styles.cardMeta }, text('waitMore', { n: waited.truncated })) : null));
+				: clampText(argsRaw) ?? '';
+			// 收起态只有这一行：标题 + 摘要（+ 被截断的条数）。展开体才是实时行。
+			const summary = waited.truncated > 0 ? `${headTitle} · ${text('waitMore', { n: waited.truncated })}` : headTitle;
 			if (waited.ids.length > 0) {
 				children.push(...waited.ids.map(renderRow));
 			} else {
@@ -740,7 +750,22 @@ window.__ModuleLoader__.load({
 					h('div', { style: block.isError === true ? styles.resultFailed : styles.resultText }, result)));
 			}
 
-			return h('div', { style: styles.card, role: 'group', 'aria-label': headTitle }, children);
+			// 折叠头与通用工具行同构：状态点 + 工具名 + 摘要 + 折叠箭头。折叠态与
+			// 通用行一样是一行；展开后不是参数 JSON，而是被等待子代理的实时信息。
+			const stateStyle = waiting ? styles.dotRunning : block?.isError === true ? styles.dotError : styles.dotIdle;
+			return h('div', { style: styles.card, role: 'group', 'aria-label': title },
+				h('button', {
+					type: 'button',
+					style: styles.rowHead,
+					onClick: () => setOpen((value) => !value),
+					'aria-expanded': open,
+					title,
+				},
+					h('span', { style: stateStyle }, '●'),
+					h('span', { style: styles.rowTitle }, title),
+					summary === '' ? null : h('span', { style: styles.rowSummary }, summary),
+					h('span', { style: styles.rowChevron }, open ? '▾' : '▸')),
+				open ? h('div', { style: styles.body }, children) : null);
 		}
 
 		/**

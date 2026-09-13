@@ -639,6 +639,21 @@ function textOf(node, out = []) {
   return out
 }
 
+/** 递归找第一个满足谓词的元素。 */
+function findElement(node, predicate) {
+  if (node === null || node === undefined || typeof node !== 'object') return undefined
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElement(child, predicate)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+  if (!('props' in node)) return undefined
+  if (predicate(node)) return node
+  return findElement(node.props.children, predicate)
+}
+
 /** 单个目录子条目（SubagentListEntry 的 child 分支）。 */
 function child(id, { activity = 'running', mode = 'continuable', label } = {}) {
   return { kind: 'child', id, activity, mode, hasChildren: false, ...(label === undefined ? {} : { label }) }
@@ -697,6 +712,58 @@ function cardProps({ block, catalog, sessionId = 'root', toolName = 'wait_subage
 /** 每行"最后活动 N <秒/分钟/小时>前"的形态（数字由展示时钟决定）。 */
 const AGE_LINE = new RegExp(`^${zh.treeLastActive} \\d+ (秒|分钟|小时)前$`)
 
+/** 卡片折叠头（带 aria-expanded 的那个按钮）。 */
+function foldHeader(view) {
+  return findElement(view.tree, (node) => node.type === 'button' && node.props['aria-expanded'] !== undefined)
+}
+
+/**
+ * 展开折叠卡。默认收起是契约的一部分：只关心"展开后内容"的用例统一经这里，
+ * 要钉折叠态本身的用例自己管展开。
+ * @param view - 已挂载的卡驱动。
+ * @returns 同一个驱动。
+ */
+async function expandCard(view) {
+  const head = foldHeader(view)
+  assert.notEqual(head, undefined, 'the card renders its fold header')
+  head.props.onClick()
+  await view.flush()
+  return view
+}
+
+/** 挂载并展开折叠卡。 */
+async function mountCardOpen(mount, props) {
+  return expandCard(await mount(client.__test.WaitSubagentCard, props))
+}
+
+test('卡片：默认收起——折叠态只有一行且不订阅，展开才开流，收起即释放', async (t) => {
+  const { mount } = useReactRuntime(t)
+  const { remote, calls } = makeRemote()
+  applyWith({ 'remote.session': remote })
+
+  const catalog = catalogWith([child('a'), child('b')])
+  const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']), catalog }))
+  const collapsed = textOf(view.tree).join('\n')
+  assert.equal(collapsed.includes(zh.waitTitleRunning.replace('{n}', '2')), true, 'the collapsed line carries the summary')
+  assert.equal(collapsed.includes(zh.treeRunning), false, 'no live rows while collapsed')
+  assert.equal(calls.length, 0, 'a collapsed card opens no stream')
+
+  const head = foldHeader(view)
+  assert.notEqual(head, undefined, 'the collapsed card still exposes its fold header')
+  assert.equal(head.props['aria-expanded'], false, 'collapsed by default')
+  head.props.onClick()
+  await view.flush()
+  assert.equal(calls.length, 2, 'expanding opens one stream per id')
+  assert.equal(textOf(view.tree).join('\n').includes(zh.treeRunning), true, 'the live rows render once expanded')
+
+  const expanded = foldHeader(view)
+  assert.equal(expanded.props['aria-expanded'], true, 'the header reports the expanded state')
+  expanded.props.onClick()
+  await view.flush()
+  assert.equal(calls.every((call) => call.signal.aborted === true), true, 'collapsing aborts its streams')
+  assert.equal(textOf(view.tree).join('\n').includes(zh.treeRunning), false, 'the live rows leave with the collapse')
+})
+
 test('卡片：运行中为每个 id 开一路流（mode 取目录，查不到按 continuable），推帧落到对应行', async (t) => {
   const { mount } = useReactRuntime(t)
   const { remote, calls, push } = makeRemote()
@@ -706,7 +773,7 @@ test('卡片：运行中为每个 id 开一路流（mode 取目录，查不到�
     child('a', { mode: 'one-shot', label: 'A' }),
     { kind: 'diagnostic', id: 'b', reason: 'corrupt' },
   ])
-  const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']), catalog }))
+  const view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a', 'b']), catalog }))
 
   assert.equal(calls.length, 2, 'each waited id gets its own stream')
   assert.deepEqual(
@@ -755,7 +822,7 @@ test('卡片：状态只认目录快照，快照里没有这个 id 就不声称�
 
   // b 的目录条目已经翻成 inactive（快照说了算，即使它那一路流还开着）。
   const catalog = catalogWith([child('a', { label: 'A' }), child('b', { activity: 'inactive', label: 'B' })])
-  const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']), catalog }))
+  const view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a', 'b']), catalog }))
   const lines = textOf(view.tree)
   assert.equal(lines.includes('A'), true)
   assert.equal(lines.filter((line) => line === zh.treeRunning).length, 1, 'the catalog-running row claims running')
@@ -764,7 +831,7 @@ test('卡片：状态只认目录快照，快照里没有这个 id 就不声称�
   await view.unmount()
 
   // 目录里查不到这个 id：只留中性圆点与 id，不替目录猜 running/inactive。
-  const unknown = await mount(client.__test.WaitSubagentCard, cardProps({
+  const unknown = await mountCardOpen(mount, cardProps({
     block: runningBlock(['a', 'b']),
     catalog: catalogWith([child('a', { activity: 'inactive', label: 'A' })]),
   }))
@@ -782,7 +849,7 @@ test('卡片：工具结算即 abort 全部流、保留结束前的信息、显�
 
   const catalog = catalogWith([child('a', { label: 'A' })])
   const result = 'subagent a done (completed); its closing message follows as the settlement notice.'
-  let view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']), catalog }))
+  let view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a']), catalog }))
   await push(0, { type: 'event', event: { type: 'assistant/message', seq: 1, time: Date.now(), data: { message: { content: [{ type: 'text', text: '收尾中' }] } } } })
   await view.flush()
   assert.equal(textOf(view.tree).includes('收尾中'), true)
@@ -807,7 +874,7 @@ test('卡片：结算后才挂载的历史卡不回放任何流，只显示返�
   applyWith({ 'remote.session': remote })
 
   const result = 'timed out waiting for subagent yyy; it is still running.'
-  const view = await mount(client.__test.WaitSubagentCard, cardProps({
+  const view = await mountCardOpen(mount, cardProps({
     block: settledBlock({ ids: ['yyy'], result }),
     catalog: catalogWith([child('yyy', { label: 'Y' })]),
   }))
@@ -824,7 +891,7 @@ test('卡片：参数畸形/名单为空时退回朴素行，且不开任何流'
   applyWith({ 'remote.session': remote })
 
   // 场景一：参数是截断的 JSON（还在流式写入，或调用头被窗口截断）。
-  const broken = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock([], { argsRaw: '{"subagent_id": ["a"' }) }))
+  const broken = await mountCardOpen(mount, cardProps({ block: runningBlock([], { argsRaw: '{"subagent_id": ["a"' }) }))
   const brokenLines = textOf(broken.tree)
   assert.equal(brokenLines.includes('wait_subagent'), true, 'the plain row names the tool')
   assert.equal(brokenLines.includes('{"subagent_id": ["a"'), true, 'raw args are shown, clamped')
@@ -832,7 +899,7 @@ test('卡片：参数畸形/名单为空时退回朴素行，且不开任何流'
   await broken.unmount()
 
   // 场景二：subagent_id 是空数组（schema 会拒，但历史日志里可能存在）。
-  const empty = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock([]) }))
+  const empty = await mountCardOpen(mount, cardProps({ block: runningBlock([]) }))
   const emptyLines = textOf(empty.tree)
   assert.equal(emptyLines.includes('wait_subagent'), true)
   assert.equal(emptyLines.includes('{"subagent_id":[]}'), true)
@@ -840,7 +907,7 @@ test('卡片：参数畸形/名单为空时退回朴素行，且不开任何流'
   await empty.unmount()
 
   // 场景三：已结算但调用头落在窗口外（call 为 null）——参数拿不到，结果文本仍在。
-  const truncated = await mount(client.__test.WaitSubagentCard, cardProps({ block: settledBlock({ result: 'unknown subagent "z".', truncated: true }) }))
+  const truncated = await mountCardOpen(mount, cardProps({ block: settledBlock({ result: 'unknown subagent "z".', truncated: true }) }))
   const truncatedLines = textOf(truncated.tree)
   assert.equal(truncatedLines.includes('wait_subagent'), true)
   assert.equal(truncatedLines.includes('unknown subagent "z".'), true)
@@ -853,10 +920,10 @@ test('卡片：超过跟随上限的 id 只开 LIMIT 路流，并在卡上说明
   applyWith({ 'remote.session': remote })
 
   const ids = Array.from({ length: 10 }, (_, index) => `id-${index}`)
-  const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(ids) }))
+  const view = await mountCardOpen(mount, cardProps({ block: runningBlock(ids) }))
   assert.equal(calls.length, 8, 'the stream fan-out is capped')
   assert.deepEqual(calls.map((call) => call.request.address.childSessionId), ids.slice(0, 8))
-  const lines = textOf(view.tree)
+  const lines = textOf(view.tree).join('\n')
   assert.equal(lines.includes('等待 8 个子代理'), true)
   assert.equal(lines.includes('另有 2 个未展示'), true, 'the cap is stated, not hidden')
 })
@@ -889,7 +956,7 @@ test('卡片：某一路 follow 失败只标该 id 读取失败，其余流不�
   const original = console.warn
   console.warn = (...args) => { warnings.push(args) }
   try {
-    const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']) }))
+    const view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a', 'b']) }))
     // follow 同步抛错发生在 effect 里，错误路径的 setState 也要提交一轮才可见。
     await view.flush()
     const lines = textOf(view.tree)
@@ -909,7 +976,7 @@ test('卡片：follow 不可用时每行显示实时不可用；已结算的卡�
   const { mount } = useReactRuntime(t)
   // 场景一：remote.session 整个缺席（包清单没注入 remotes 半边）。
   applyWith({})
-  const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']) }))
+  const view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a', 'b']) }))
   const lines = textOf(view.tree)
   assert.equal(lines.filter((line) => line === zh.treeLiveUnavailable).length, 2, 'each row states it')
   assert.equal(lines.includes(zh.treeLoading), false)
@@ -918,11 +985,11 @@ test('卡片：follow 不可用时每行显示实时不可用；已结算的卡�
   // 场景二：remote.session 存在但没有 follow（网关拒绝这一路能力）。
   const second = useReactRuntime(t)
   applyWith({ 'remote.session': {} })
-  const noFollow = await second.mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']) }))
+  const noFollow = await mountCardOpen(second.mount, cardProps({ block: runningBlock(['a']) }))
   assert.equal(textOf(noFollow.tree).includes(zh.treeLiveUnavailable), true)
 
   // 场景三：已结算的卡本来就不订阅，不该说"实时不可用"。
-  const settled = await second.mount(client.__test.WaitSubagentCard, cardProps({ block: settledBlock({ ids: ['a'], result: 'done' }) }))
+  const settled = await mountCardOpen(second.mount, cardProps({ block: settledBlock({ ids: ['a'], result: 'done' }) }))
   assert.equal(textOf(settled.tree).includes(zh.treeLiveUnavailable), false)
 })
 
@@ -931,7 +998,7 @@ test('卡片：结算先于第一帧到达时不留下永久「加载中」', as
   const { remote } = makeRemote()
   applyWith({ 'remote.session': remote })
 
-  let view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']) }))
+  let view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a']) }))
   assert.equal(textOf(view.tree).includes(zh.treeLoading), true, 'the running row waits for its first frame')
 
   // 工具在首帧到达前就结算（对早已完成的子代理是常见路径）：pending 标记还在，但
@@ -953,12 +1020,12 @@ test('卡片：展示时钟只在有"最后活动"可走动时存在，一个不
     applyWith({ 'remote.session': remote })
 
     // 参数畸形的朴素行：没有可走动的时间戳，不建定时器。
-    const fallback = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock([]) }))
+    const fallback = await mountCardOpen(mount, cardProps({ block: runningBlock([]) }))
     assert.equal(clockCount(), 0, 'a plain row has nothing to age')
     await fallback.unmount()
 
     // 运行中的卡：第一帧之前没有时间戳，不建；帧到达后建一个。
-    const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']) }))
+    const view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a']) }))
     assert.equal(clockCount(), 0)
     await push(0, { type: 'event', event: { type: 'assistant/message', seq: 1, time: Date.now(), data: { message: { content: [{ type: 'text', text: '跑起来了' }] } } } })
     await view.flush()
@@ -987,7 +1054,7 @@ test('卡片：流干净收尾即从订阅表释放，下一轮目标变化重�
   }
   applyWith({ 'remote.session': remote })
 
-  const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']) }))
+  const view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a', 'b']) }))
   assert.deepEqual(subscribed, ['a', 'b'], 'both waited ids opened a stream')
   await view.flush()
   const lines = textOf(view.tree)
@@ -1011,7 +1078,7 @@ test('卡片：座位没给 sessionId 时不订阅任何流（契约被破坏也
 
   // session 作用域的座位一定给 sessionId；给了异常值也不该退化成"用 undefined
   // 当父会话 id 去订阅"。
-  const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']), sessionId: null }))
+  const view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a']), sessionId: null }))
   assert.equal(calls.length, 0, 'no parent session id, no stream')
   const lines = textOf(view.tree)
   assert.equal(lines.includes('等待 1 个子代理'), true)
@@ -1030,7 +1097,7 @@ test('卡片：取 follow 属性抛错时只记日志，不开流也不让异常
   console.warn = (...args) => { warnings.push(args) }
   try {
     // mount 本身不 reject 就是断言：effect 里的属性访问异常没有逃出去。
-    const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']) }))
+    const view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a']) }))
     const lines = textOf(view.tree)
     assert.equal(lines.includes(zh.treeLiveUnavailable), true, 'a rejecting property access reads as live-unavailable')
     assert.equal(warnings.filter((args) => String(args[0]).includes('remote.session')).length >= 1, true, 'the rejected property access is logged')
@@ -1048,7 +1115,7 @@ test('卡片：useSessions 抛错时按 id 渲染并记日志，不把异常甩�
   const original = console.warn
   console.warn = (...args) => { warnings.push(args) }
   try {
-    const view = await mount(client.__test.WaitSubagentCard, cardProps({
+    const view = await mountCardOpen(mount, cardProps({
       block: runningBlock(['a']),
       useSessions: () => { throw new Error('store exploded') },
     }))
@@ -1078,7 +1145,7 @@ test('卡片：被 abort 的旧流迟到帧不得改写状态（所有权守卫�
   }
   applyWith({ 'remote.session': remote })
 
-  let view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']) }))
+  let view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a', 'b']) }))
   assert.equal(textOf(view.tree).includes('FRESH'), true, 'the live frame lands on the row')
 
   // 工具结算 → 组件 abort 全部流；旧 generator 随后交付的迟到帧必须被丢弃。
