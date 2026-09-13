@@ -1,5 +1,6 @@
 /**
- * 浏览器半边（src/client.js）的 node 单测。分两层：
+ * 浏览器半边（src/client.js）的 node 单测：`wait_subagent` 与派发工具
+ * （`subagent` 及各角色工具）两类工具卡。分两层：
  *
  * 1. 装载层：fake `window.__ModuleLoader__` + fake `require('react')`（模块体只
  *    注册工厂，与真实浏览器加载同构），断言注册契约、locale 词典与包清单注入。
@@ -107,8 +108,9 @@ test('工厂：注册包名行并导出 inject/apply/__test 接缝', () => {
   assert.equal(typeof client.apply, 'function')
   assert.deepEqual(client.inject, ['slots', 'locale', 'remote', 'remote.session'])
   assert.deepEqual(Object.keys(client.__test).sort(), [
-    'WaitSubagentBody', 'WaitSubagentCard', 'en', 'foldEvents', 'followRequest', 'formatAge',
-    'subscriptionDiff', 'targetKey', 'targetRecords', 'waitedIds', 'zh',
+    'DispatchToolBody', 'DispatchToolCard', 'PROMPT_LIMIT', 'WaitSubagentBody', 'WaitSubagentCard',
+    'childIdFromText', 'dispatchArgs', 'dispatchSummary', 'dispatchToolNames', 'en', 'foldEvents',
+    'followRequest', 'formatAge', 'subscriptionDiff', 'targetKey', 'targetRecords', 'waitedIds', 'zh',
   ])
 })
 
@@ -154,12 +156,14 @@ test('locale：座位与词典同 ns，zh/en 键集一致且覆盖全部词条',
   // 座位注册的 locale 必须与 apply 的 register(NS, ...) 同 ns，否则文案退回原始 key。
   const { ctx, seats } = makeCtx()
   client.apply(ctx)
-  assert.equal(seats.length, 2)
+  // 设置页一个座位 + 每个接管的工具各一个（wait_subagent 与全部派发工具名）。
+  assert.equal(seats.length, 1 + 1 + client.__test.dispatchToolNames.length)
   for (const seat of seats) assert.equal(seat.registration.locale, 'eng-panel')
 
   // 硬编码键表：新增文案漏了英文（缺 key 会直接显示原始 key）这里变红。
   assert.deepEqual(Object.keys(zh).sort(), [
-    'description', 'guardHint', 'guardLabel', 'loadFailed', 'loading', 'retry', 'save', 'saveFailed',
+    'description', 'dispatchBackground', 'dispatchDefaultModel', 'dispatchForeground', 'dispatchOmitted',
+    'dispatchPrompt', 'guardHint', 'guardLabel', 'loadFailed', 'loading', 'retry', 'save', 'saveFailed',
     'saved', 'saving', 'tab', 'title',
     'treeAgeHours', 'treeAgeMinutes', 'treeAgeSeconds', 'treeInactive', 'treeLastActive',
     'treeLastTool', 'treeLiveUnavailable', 'treeLoading', 'treeReadFailed', 'treeRunning',
@@ -172,7 +176,7 @@ test('locale：座位与词典同 ns，zh/en 键集一致且覆盖全部词条',
   }
 
   // 插值词条必须保留 {n} 占位符，否则档位数字/条数无处可填。
-  for (const key of ['treeAgeSeconds', 'treeAgeMinutes', 'treeAgeHours', 'waitTitleRunning', 'waitMore']) {
+  for (const key of ['treeAgeSeconds', 'treeAgeMinutes', 'treeAgeHours', 'waitTitleRunning', 'waitMore', 'dispatchOmitted']) {
     assert.equal(zh[key].includes('{n}'), true, `zh.${key}`)
     assert.equal(en[key].includes('{n}'), true, `en.${key}`)
   }
@@ -418,6 +422,89 @@ test('targetRecords：snapshot 取 records、event 取单条，其他帧不给�
   assert.equal(targetRecords({ type: 'assistant-stream', frame: {} }), undefined)
   assert.equal(targetRecords(null), undefined)
   assert.equal(targetRecords('nope'), undefined)
+})
+
+// ------------------------------------------------- 派发工具卡（纯函数层）
+
+test('dispatchArgs：解析 description/prompt/model/run_in_background，畸形一律空参数', () => {
+  const { dispatchArgs } = client.__test
+
+  assert.deepEqual(
+    dispatchArgs(JSON.stringify({ description: '读 spec', prompt: '先读 spec。\n再写代码。', model: 'deepseek-v4-pro', run_in_background: true })),
+    { description: '读 spec', prompt: '先读 spec。\n再写代码。', model: 'deepseek-v4-pro', background: true },
+  )
+  // 缺 model：模型段由卡决定怎么显示，解析层只给 undefined。
+  assert.deepEqual(
+    dispatchArgs(JSON.stringify({ description: '读 spec', prompt: '正文' })),
+    { description: '读 spec', prompt: '正文', model: undefined, background: true },
+  )
+  // 缺 description：提示词顶上（在摘要里），这里同样只给 undefined。
+  assert.deepEqual(
+    dispatchArgs(JSON.stringify({ prompt: '正文' })),
+    { description: undefined, prompt: '正文', model: undefined, background: true },
+  )
+  // run_in_background 只在显式 false 时是前台（插件默认后台派发）。
+  assert.equal(dispatchArgs(JSON.stringify({ description: 'd', prompt: 'p', run_in_background: false })).background, false)
+  assert.equal(dispatchArgs(JSON.stringify({ description: 'd', prompt: 'p', run_in_background: true })).background, true)
+
+  // 空串与非字符串字段按"没有这一项"，不把空串当描述。
+  assert.deepEqual(
+    dispatchArgs(JSON.stringify({ description: '', prompt: '', model: 42 })),
+    { description: undefined, prompt: undefined, model: undefined, background: true },
+  )
+
+  const empty = { description: undefined, prompt: undefined, model: undefined, background: true }
+  const malformed = ['{"prompt": "半', 'null', '"a"', '42', '[]', '', undefined, null]
+  for (const raw of malformed) assert.deepEqual(dispatchArgs(raw), empty, String(raw))
+})
+
+test('dispatchSummary：工具名 · 模型 · 描述；模型缺席时不留空分隔符', () => {
+  const { dispatchArgs, dispatchSummary } = client.__test
+
+  const full = dispatchArgs(JSON.stringify({ description: '读 spec', prompt: '正文', model: 'deepseek-v4-pro' }))
+  assert.equal(dispatchSummary('subagent', full), 'subagent · deepseek-v4-pro · 读 spec')
+
+  const noModel = dispatchArgs(JSON.stringify({ description: '读 spec', prompt: '正文' }))
+  assert.equal(dispatchSummary('scout', noModel), 'scout · 读 spec')
+  assert.equal(dispatchSummary('scout', noModel).includes('  '), false, 'no empty separator where the model would be')
+
+  // 描述缺席：用压平成单行、截断到 120 的提示词顶上（摘要必须是一行）。
+  const noDescription = dispatchArgs(JSON.stringify({ prompt: '先读 spec。\n再写代码。' }))
+  assert.equal(dispatchSummary('implementer', noDescription), 'implementer · 先读 spec。 再写代码。')
+  assert.equal(dispatchSummary('implementer', dispatchArgs(JSON.stringify({ prompt: 'x'.repeat(300) }))).endsWith('…'), true)
+
+  // 描述与提示词都拿不到（参数畸形、调用头被窗口截断）：不编摘要，交给通用行显示
+  // 原始参数 JSON——与其它工具一致。
+  assert.equal(dispatchSummary('subagent', dispatchArgs('{"prompt": "半')), undefined)
+  assert.equal(dispatchSummary('subagent', dispatchArgs(undefined)), undefined)
+})
+
+test('childIdFromText：认得 UUID 与 session- 两种形态，近似词不误认', () => {
+  const { childIdFromText } = client.__test
+
+  assert.equal(
+    childIdFromText('started subagent c7590eef-754f-44b6-8a3a-5bcb8d71e8d0'),
+    'c7590eef-754f-44b6-8a3a-5bcb8d71e8d0',
+  )
+  assert.equal(
+    childIdFromText('started subagent session-470e3ffc-508d-4297-b8ff-a9a20b978dd1'),
+    'session-470e3ffc-508d-4297-b8ff-a9a20b978dd1',
+  )
+  // dsh-sdk 提供方的子会话 id：`session-` + 32 位无连字符 UUID。
+  assert.equal(
+    childIdFromText('started subagent session-470e3ffc508d4297b8ffa9a20b978dd1'),
+    'session-470e3ffc508d4297b8ffa9a20b978dd1',
+  )
+  // 第一个像会话 id 的 token 说了算（前台派发回的是子代理自己的收尾输出）。
+  assert.equal(
+    childIdFromText('结论见 c7590eef-754f-44b6-8a3a-5bcb8d71e8d0 与 11111111-2222-3333-4444-555555555555'),
+    'c7590eef-754f-44b6-8a3a-5bcb8d71e8d0',
+  )
+  // 后台 one-shot 回的是 job id，不是会话 id。
+  assert.equal(childIdFromText('started background subagent job 7f3c1a'), undefined)
+  // 正文里的近似词不是会话 id：误认会给一个不存在的子代理开流。
+  assert.equal(childIdFromText('见 session-persistence-sqlite 的路径配置'), undefined)
+  for (const value of ['', undefined, null, 42, {}]) assert.equal(childIdFromText(value), undefined)
 })
 
 // ---------------------------------------------------------------- 组件层
@@ -709,21 +796,54 @@ function settledBlock({ ids = [], result, isError = false, truncated = false } =
   }
 }
 
+/** 运行中的派发工具块：参数在 argsRaw（流式写入中可能是半个 JSON）。 */
+function runningDispatchBlock(args, { toolName = 'subagent', argsRaw } = {}) {
+  return {
+    callId: 'call-1',
+    name: toolName,
+    argsRaw: argsRaw ?? JSON.stringify(args),
+    turn: 1,
+    step: 1,
+    time: 1,
+    subCalls: [],
+  }
+}
+
+/** 已结算的派发工具块：参数在 call?.argsRaw，结果文本在 content。 */
+function settledDispatchBlock({ args = {}, result, isError = false, truncated = false, toolName = 'subagent' } = {}) {
+  return {
+    kind: 'tool-result',
+    seq: 2,
+    time: 2,
+    callId: 'call-1',
+    call: truncated ? null : { name: toolName, argsRaw: JSON.stringify(args) },
+    content: result === undefined ? [] : [{ type: 'text', text: result }],
+    isError,
+    subCalls: [],
+  }
+}
+
 /**
  * 卡片 props：默认走真实词典的中文分支（与 __test.zh 同源），目录选择器是一个
  * 普通函数（组件只在渲染期调用它，与真实 hook 的调用位点同形）。
+ *
+ * `text` 与 `t` 同源：座位给卡的是 `t`，展开体组件收的是 `text`（两个卡都是）。
+ * 两份都给，`rerender(cardProps(...))` 才不会把展开体的翻译函数丢掉——丢了以后
+ * 模块级默认 `t`（测试里被 `locale.bind` 桩成 identity）会让断言悄悄退回原始 key。
  */
 function cardProps({ block, catalog, sessionId = 'root', toolName = 'wait_subagent', useSessions } = {}) {
+  const t = (key, params) => {
+    const template = zh[key] ?? key
+    return params === undefined ? template : template.replace(/\{n\}/g, String(params.n))
+  }
   return {
     callId: block.callId ?? 'call-1',
     toolName,
     block,
     sessionId,
     useSessions: useSessions ?? ((selector) => selector({ subagentsByParent: catalog ?? {} })),
-    t: (key, params) => {
-      const template = zh[key] ?? key
-      return params === undefined ? template : template.replace(/\{n\}/g, String(params.n))
-    },
+    t,
+    text: t,
   }
 }
 
@@ -736,7 +856,15 @@ const AGE_LINE = new RegExp(`^${zh.treeLastActive} \\d+ (秒|分钟|小时)前$`
  * 适配器用例钉。
  */
 async function mountCardOpen(mount, props) {
-  return mount(client.__test.WaitSubagentBody, { ...props, text: props.t, standalone: false })
+  return mount(client.__test.WaitSubagentBody, { ...props, text: props.text ?? props.t, standalone: false })
+}
+
+/**
+ * 挂载派发卡的展开体。折叠/展开由 harness 的通用行（`ToolRow` 的
+ * `{open && children}`）负责，所以"展开才订阅"靠组件只在展开体里挂载来保证。
+ */
+async function mountDispatchOpen(mount, props, standalone = false) {
+  return mount(client.__test.DispatchToolBody, { ...props, text: props.text ?? props.t, standalone })
 }
 
 test('卡片：折叠行交给 harness 的通用行——展开体作为 bodyContent 传下去', async (t) => {
@@ -1159,4 +1287,249 @@ test('卡片：被 abort 的旧流迟到帧不得改写状态（所有权守卫�
   await view.flush()
   assert.equal(textOf(view.tree).includes('STALE'), false, 'ownership guard drops the late frame')
   assert.equal(textOf(view.tree).includes('FRESH'), true, 'the surviving stream keeps its folded info')
+})
+
+// ------------------------------------------------- 派发工具卡（组件层）
+
+test('派发卡：折叠行交给 harness 的通用行，摘要是「工具名 · 模型 · 描述」', async (t) => {
+  const { mount } = useReactRuntime(t)
+  const { remote, calls } = makeRemote()
+  applyWith({ 'remote.session': remote })
+
+  const view = await mount(client.__test.DispatchToolCard, cardProps({
+    toolName: 'scout',
+    block: runningDispatchBlock({ description: '读 spec', prompt: '正文', model: 'deepseek-v4-pro' }),
+  }))
+  const row = findElement(view.tree, (node) => node.props?.['data-generic-tool-card'] !== undefined)
+  assert.notEqual(row, undefined, 'the dispatch card renders the harness generic row')
+  assert.equal(row.props['data-generic-tool-card'], 'scout', 'the row keeps the wire tool name')
+  assert.equal(row.props['data-generic-summary'], 'scout · deepseek-v4-pro · 读 spec', 'the collapsed summary is ours, never the argument JSON')
+  assert.equal(row.props['data-generic-body'], true, 'the dispatch body travels as bodyContent')
+  assert.equal(row.props['data-generic-t'], 'function', 'the conversation translator rides along for the row labels')
+  // 展开体只在通用行展开时才挂载（ToolRow 的 {open && children}），所以这里尚未开流。
+  assert.equal(calls.length, 0, 'nothing subscribes until the harness expands the row')
+})
+
+test('派发卡：没有通用行导出时降级——摘要、三块与结果仍然可见', async (t) => {
+  const { mount } = useReactRuntime(t)
+  applyWith({ 'remote.session': {} })
+
+  const view = await mountDispatchOpen(mount, cardProps({
+    toolName: 'scout',
+    block: settledDispatchBlock({
+      args: { description: '读 spec', prompt: '正文' },
+      result: '子代理的收尾输出',
+    }),
+  }), true)
+  const lines = textOf(view.tree).join('\n')
+  assert.equal(lines.includes('scout · 读 spec'), true, 'the fallback carries the summary instead of the harness row')
+  assert.equal(lines.includes('子代理的收尾输出'), true, 'the fallback shows the result itself (no harness OUTPUT section)')
+})
+
+test('派发展开体：描述/元信息/提示词逐块渲染，提示词保留换行，超长截断并标注省略', async (t) => {
+  const { mount } = useReactRuntime(t)
+  applyWith({ 'remote.session': {} })
+
+  const prompt = '第一行\n第二行\n\n第三行'
+  const full = await mountDispatchOpen(mount, cardProps({
+    toolName: 'implementer',
+    block: settledDispatchBlock({
+      args: { description: '实现这张卡', prompt, model: 'deepseek-v4-pro', run_in_background: false },
+      result: 'done',
+    }),
+  }))
+  const lines = textOf(full.tree)
+  assert.equal(lines.includes('实现这张卡'), true, 'the description is its own line')
+  assert.equal(lines.includes(`deepseek-v4-pro · ${zh.dispatchForeground}`), true, 'the meta line names the model and the foreground wait')
+  assert.equal(lines.includes(zh.dispatchPrompt), true, 'the prompt has its label')
+  assert.equal(lines.includes(prompt), true, 'the prompt keeps its line breaks (one text node, not flattened)')
+  const promptNode = findElement(full.tree, (node) => node.props?.children === prompt)
+  assert.notEqual(promptNode, undefined, 'the prompt renders as body text')
+  assert.equal(promptNode.props.style.whiteSpace, 'pre-wrap', 'the prompt is typeset as body text')
+  assert.equal(lines.includes(zh.dispatchOmitted.replace('{n}', '4')), false, 'nothing is claimed omitted below the limit')
+
+  // 缺 model 与 run_in_background：默认模型 + 后台派发（与插件默认一致）。
+  const minimal = await mountDispatchOpen(mount, cardProps({
+    toolName: 'subagent',
+    block: settledDispatchBlock({ args: { description: '最小参数', prompt: '正文' }, result: 'done' }),
+  }))
+  const minimalLines = textOf(minimal.tree)
+  assert.equal(minimalLines.includes(`${zh.dispatchDefaultModel} · ${zh.dispatchBackground}`), true, 'absent model and absent run_in_background fall back to the plugin defaults')
+  assert.equal(minimalLines.includes(`${zh.dispatchDefaultModel} · ${zh.dispatchForeground}`), false)
+
+  // 超长提示词：截断到 PROMPT_LIMIT，末尾如实报出省略了多少字符。
+  const promptLimit = client.__test.PROMPT_LIMIT
+  assert.equal(Number.isInteger(promptLimit) && promptLimit > 0, true, 'PROMPT_LIMIT is a positive integer')
+  const long = 'y'.repeat(promptLimit) + 'TAIL'
+  const truncated = await mountDispatchOpen(mount, cardProps({
+    toolName: 'subagent',
+    block: settledDispatchBlock({ args: { description: '长提示词', prompt: long }, result: 'done' }),
+  }))
+  const truncatedLines = textOf(truncated.tree)
+  assert.equal(truncatedLines.includes('y'.repeat(promptLimit)), true, 'the kept prefix is rendered')
+  assert.equal(truncatedLines.some((line) => line.endsWith('TAIL')), false, 'the tail is dropped')
+  assert.equal(truncatedLines.includes(zh.dispatchOmitted.replace('{n}', '4')), true, 'the omission is stated, not hidden')
+
+  // 代理对正好压在截断点上：宁可少一个字，也不要吐出半个字形（切在 UTF-16 单元
+  // 边界上会把 emoji 劈成两半），省略计数把这两半都算进去。
+  const pair = `${'z'.repeat(promptLimit - 1)}😀TAIL`
+  const cut = await mountDispatchOpen(mount, cardProps({
+    toolName: 'subagent',
+    block: settledDispatchBlock({ args: { description: '代理对', prompt: pair }, result: 'done' }),
+  }))
+  const cutLines = textOf(cut.tree)
+  assert.equal(cutLines.includes('z'.repeat(promptLimit - 1)), true, 'the cut backs off the whole surrogate pair')
+  assert.equal(cutLines.some((line) => /[\uD800-\uDBFF]$/.test(line)), false, 'no lone high surrogate is rendered')
+  assert.equal(cutLines.includes(zh.dispatchOmitted.replace('{n}', '6')), true, 'both halves of the pair count as omitted')
+})
+
+test('派发卡：结算文本里的子会话 id + 目录说仍在运行 → 开流，推帧落到那一行', async (t) => {
+  const { mount } = useReactRuntime(t)
+  const { remote, calls, push } = makeRemote()
+  applyWith({ 'remote.session': remote })
+
+  const childId = 'c7590eef-754f-44b6-8a3a-5bcb8d71e8d0'
+  const catalog = catalogWith([child(childId, { label: '读 spec 的子代理' })])
+  const view = await mountDispatchOpen(mount, cardProps({
+    toolName: 'subagent',
+    catalog,
+    block: settledDispatchBlock({
+      args: { description: '读 spec', prompt: '正文' },
+      result: `started subagent ${childId}`,
+    }),
+  }))
+
+  assert.equal(calls.length, 1, 'the running child gets one stream')
+  assert.deepEqual(
+    [calls[0].request.address.parentSessionId, calls[0].request.address.childSessionId, calls[0].request.address.mode, calls[0].request.maxMessages],
+    ['root', childId, 'continuable', 4],
+  )
+  const initial = textOf(view.tree).join('\n')
+  assert.equal(initial.includes('读 spec 的子代理'), true, 'the label comes from the catalog')
+  assert.equal(initial.includes(zh.treeRunning), true, 'the catalog says it is running')
+  assert.equal(initial.includes(zh.treeLoading), true, 'the row waits for its first frame')
+
+  // 帧到达 → 该行显示最后一个工具与最后一行，时间走起来。
+  await push(0, { type: 'event', event: { type: 'tool/call', seq: 1, time: Date.now(), data: { name: 'rg' } } })
+  await push(0, { type: 'event', event: { type: 'assistant/message', seq: 2, time: Date.now(), data: { message: { content: [{ type: 'text', text: '正在读 spec' }] } } } })
+  await view.flush()
+  const lines = textOf(view.tree)
+  assert.equal(lines.includes(`${zh.treeLastTool} rg · 正在读 spec`), true, 'folded tool + last line land on the row')
+  assert.equal(lines.some((line) => /最后活动 \d+ (秒|分钟|小时)前/.test(line)), true, 'last-active age is rendered on the row')
+  assert.equal(lines.includes(zh.treeLoading), false, 'the row left its loading state')
+
+  // 卸载：这一路流 abort（与等待卡同一套所有权与清理）。
+  await view.unmount()
+  assert.equal(calls[0].aborted, true, 'unmount aborts the stream')
+})
+
+test('派发卡：目录说已结束或查不到 id、结算文本里没有 id 时都不开流也不抛', async (t) => {
+  const { mount } = useReactRuntime(t)
+  const { remote, calls } = makeRemote()
+  applyWith({ 'remote.session': remote })
+
+  const childId = 'c7590eef-754f-44b6-8a3a-5bcb8d71e8d0'
+  const result = `started subagent ${childId}`
+  const args = { description: '读 spec', prompt: '正文' }
+
+  // 场景一：目录说这个子代理已经结束——不订阅，但那一行照常显示（状态列写"已结束"），
+  // 结束前折叠出的信息留在上面。
+  const inactive = await mountDispatchOpen(mount, cardProps({
+    toolName: 'subagent',
+    catalog: catalogWith([child(childId, { activity: 'inactive', label: '已完成的子代理' })]),
+    block: settledDispatchBlock({ args, result }),
+  }))
+  const inactiveLines = textOf(inactive.tree).join('\n')
+  assert.equal(calls.length, 0, 'a finished child is not followed')
+  assert.equal(inactiveLines.includes('已完成的子代理'), true, 'the row stays, stating the catalog status')
+  assert.equal(inactiveLines.includes(zh.treeInactive), true, 'the status column says finished')
+  assert.equal(inactiveLines.includes(zh.treeLoading), false, 'a row with no live stream never claims to be loading')
+  assert.equal(inactiveLines.includes('读 spec'), true, 'the static blocks still render')
+  await inactive.unmount()
+
+  // 场景二：目录里查不到这个 id——不替目录猜"还在跑"。
+  const unknown = await mountDispatchOpen(mount, cardProps({
+    toolName: 'subagent',
+    catalog: {},
+    block: settledDispatchBlock({ args, result }),
+  }))
+  const unknownLines = textOf(unknown.tree).join('\n')
+  assert.equal(calls.length, 0, 'an unknown id opens no stream')
+  assert.equal(unknownLines.includes(childId), false, 'no live row for an unknown child')
+  assert.equal(unknownLines.includes('读 spec'), true)
+  await unknown.unmount()
+
+  // 场景三：结算文本里没有会话 id（后台 one-shot 回的是 job id）——只有静态三块。
+  const noId = await mountDispatchOpen(mount, cardProps({
+    toolName: 'subagent',
+    catalog: catalogWith([child(childId, { label: '读 spec 的子代理' })]),
+    block: settledDispatchBlock({ args, result: 'started background subagent job job-7f3c1a' }),
+  }))
+  const noIdLines = textOf(noId.tree).join('\n')
+  assert.equal(calls.length, 0, 'no id, no stream')
+  assert.equal(noIdLines.includes('读 spec 的子代理'), false, 'no live row is invented')
+  assert.equal(noIdLines.includes('读 spec'), true, 'the static blocks still render')
+  await noId.unmount()
+
+  // 场景四：参数畸形（流式写入的半个 JSON）——静态块退化到只剩元信息行，仍不开流、不抛。
+  const malformed = await mountDispatchOpen(mount, cardProps({
+    toolName: 'subagent',
+    block: runningDispatchBlock({}, { argsRaw: '{"description": "读 sp' }),
+  }))
+  assert.equal(calls.length, 0, 'malformed args open no stream')
+  assert.equal(textOf(malformed.tree).includes(`${zh.dispatchDefaultModel} · ${zh.dispatchBackground}`), true, 'the meta line survives malformed args')
+})
+
+test('apply：subagent 与每个角色工具都有 keyed 座位，注册项除 key 与组件外一致', () => {
+  const { ctx, seats } = makeCtx()
+  client.apply(ctx)
+
+  // 角色名是 dsh-subagent-dispatch 配置里的事实（profile patch 的 roles 段）：改了
+  // 配置而没改这张表，那些工具的卡就悄悄退回通用行——所以这里硬编码对照。
+  const roles = ['researcher', 'scout', 'tdd-tester', 'implementer', 'reviewer', 'code-quality-reviewer', 'lark']
+  assert.deepEqual(client.__test.dispatchToolNames, ['subagent', ...roles])
+
+  const cards = seats.filter((seat) => seat.registration.name === 'tool.call.toolview')
+  assert.deepEqual(cards.map((seat) => seat.registration.key), ['wait_subagent', 'subagent', ...roles])
+  for (const seat of cards) {
+    assert.equal(seat.registration.order, 10)
+    assert.equal(seat.registration.locale, 'eng-panel')
+    assert.equal(Object.hasOwn(seat.registration, 'id'), false)
+  }
+  // wait_subagent 用自己的展开体；八个派发键共用同一个组件（一张卡，八个键）。
+  assert.equal(cards[0].component, client.__test.WaitSubagentCard)
+  for (const seat of cards.slice(1)) assert.equal(seat.component, client.__test.DispatchToolCard)
+})
+
+test('派发卡：目录翻成已结束 → 释放那一流，行留在原地并保留折叠出的信息', async (t) => {
+  const { mount } = useReactRuntime(t)
+  const { remote, calls, push } = makeRemote()
+  applyWith({ 'remote.session': remote })
+
+  const childId = 'c7590eef-754f-44b6-8a3a-5bcb8d71e8d0'
+  const result = `started subagent ${childId}`
+  const args = { description: '读 spec', prompt: '正文' }
+  const catalogOf = (activity) => catalogWith([child(childId, { activity, label: '读 spec 的子代理' })])
+
+  let view = await mountDispatchOpen(mount, cardProps({
+    toolName: 'subagent',
+    catalog: catalogOf('running'),
+    block: settledDispatchBlock({ args, result }),
+  }))
+  assert.equal(calls.length, 1, 'a running child is followed')
+  await push(0, { type: 'event', event: { type: 'assistant/message', seq: 1, time: Date.now(), data: { message: { content: [{ type: 'text', text: '收尾中' }] } } } })
+  await view.flush()
+  assert.equal(textOf(view.tree).join('\n').includes('收尾中'), true, 'the live frame lands on the row')
+
+  // 目录推送说它跑完了 → 目标清单清空 → 差分 abort 这一路，且不再开新的。
+  view = await view.rerender(cardProps({
+    toolName: 'subagent',
+    catalog: catalogOf('inactive'),
+    block: settledDispatchBlock({ args, result }),
+  }))
+  assert.equal(calls[0].aborted, true, 'a finished child releases its stream')
+  assert.equal(calls.length, 1, 'settling the child opens nothing new')
+  const lines = textOf(view.tree).join('\n')
+  assert.equal(lines.includes('收尾中'), true, 'the folded info stays after the stream is released')
+  assert.equal(lines.includes(zh.treeInactive), true, 'the row states the catalog status')
 })

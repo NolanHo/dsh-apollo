@@ -7,7 +7,7 @@
 1. **流程技能**：把大型需求拆成协同 Spec，逐波 worktree 执行、内置子代理代码审查、验证后合入；单个边界明确的任务走 `main-agent-driven-development`，其实现节点依赖本包捆绑的 `tdd` 与 `diagnosing-bugs`。全部节点基于 DSH 原生能力（`subagent` / `workflow` / 后台任务），不依赖外部执行后端，对任何 preset 生效。
 2. **「工程模式」（eng）agent 预设**：面向编码与基础设施任务的 preset（工具目录、委派、压缩与提示词组合），带**退出守卫**——回合结束前仍有运行中的子代理或后台任务时不允许收尾（默认关闭，在 `eng.json` 或设置面板里打开）。
 3. **设置面板**：设置页 → Plugins → 「工程模式」，读写退出守卫开关，保存即时生效。
-4. **`wait_subagent` 卡**：对话流里该工具的卡片显示 `subagent_id` 里每个子代理的实时信息（状态 / 最后活动 / 最后一个工具 / 最后一行助手文本），而不是原始 JSON。
+4. **工具卡**：`wait_subagent` 的卡片显示 `subagent_id` 里每个子代理的实时信息（状态 / 最后活动 / 最后一个工具 / 最后一行助手文本）；派发工具（`subagent` 与各角色工具）的卡片显示描述 / 模型与前后台 / 提示词，并跟随这次派发出的子代理——都是实时信息，而不是原始 JSON。
 
 零依赖、无构建步骤，纯 ESM。
 
@@ -133,6 +133,15 @@ rm -rf ~/.dsh/.agent-presets/eng
 - 重放一路流的开场快照 ≈ 重付该子代理的整段日志：`maxMessages: 4` 的切点锚在倒数第 4 条 `user/message`，而子代理通常只有 1–4 条，所以窗口基本就是整段日志（实测单个子代理约 38 万字节）。这正是"结算后不再开流"与单卡上限 8 路的原因。
 - 流失败后不自动重连；卡卸载（滚出渲染窗口）即释放全部订阅。
 
+### 派发工具的卡片
+
+同一个座位还按 wire 工具名接管**派发工具**：`subagent`（`dsh-subagent-dispatch` 的通用派发工具）与它在 `roles` 配置里注册的每个角色工具（本机 profile patch 的 `researcher` / `scout` / `tdd-tester` / `implementer` / `reviewer` / `code-quality-reviewer` / `lark`）。名单写在 `src/client.js` 的 `DISPATCH_TOOL_NAMES`：**改插件配置里的角色，这里要跟着加**（名字对不上只是退回通用行，不会报错）。
+
+- **折叠摘要**是 `工具名 · 模型 · 描述`；`model` 缺席时整段省掉（不留空分隔符），`description` 缺席时用压平截断后的提示词顶上，两项都拿不到（参数还在流式写入、调用头被窗口截断、JSON 畸形）时交给通用行显示原始参数 JSON。
+- **展开体不是参数 JSON**，而是四块：描述（无则省）、元信息行（`模型 ?? 默认模型` · `后台派发`/`前台等待`）、提示词正文（保留换行，超过 4000 字符截断并在末尾报出省略多少），以及这次派发出来的**子代理那一行实时信息**。
+- 子代理 id 从**已结算的返回文本**里解析（`started subagent <id>`，UUID 或 `session-…`；后台 one-shot 回的是 job id，取不到）：取不到就只显示前三块。id 还要在会话目录（`subagentsByParent`）里认领得到才成行——正则只是形状匹配，前台派发的返回文本是子代理自己的输出，里面可能正好有一个 UUID。
+- 实时行与 `wait_subagent` 是**同一套**（同一个 `subagentRowElement` 与 `useFollowFeeds`：标签/状态/最后活动/最后工具/最后一行 + `remote.session.follow` 推送流）：**只有卡在展开体里挂载、目录说这个子代理仍在运行时才订阅**；目录说已结束时那一行留在原地（状态列写"已结束"），已折叠出的信息一并保留，但不再订阅、不回放日志。父会话 id 用座位的 `sessionId`，follow 地址的 mode 优先取目录快照、取不到按 `continuable`。
+
 ## 机制
 
 `cordis.patch.yml` 只插入**一行**宿主插件 `apollo-skills`（裸包名 `dsh-apollo`）。单行是硬约束，不是偏好：
@@ -160,7 +169,7 @@ rm -rf ~/.dsh/.agent-presets/eng
 ## 开发
 
 ```sh
-node --test          # 103 例：技能 provider、捆绑技能目录、预设同步、预设漂移自检、配置读取、退出守卫、wait_subagent、面板路由、wait_subagent 卡片（座位与词典契约、参数解析、折叠/时长纯函数、follow 请求形状、流订阅差分与所有权、组件级渲染与生命周期）
+node --test          # 115 例：技能 provider、捆绑技能目录、预设同步、预设漂移自检、配置读取、退出守卫、wait_subagent、面板路由、工具卡（座位与词典契约、wait_subagent 参数解析、派发参数/摘要/子会话 id 解析、折叠/时长纯函数、follow 请求形状、流订阅差分与所有权、两个卡的组件级渲染与生命周期）
 ```
 
 `presets/eng/` 是仓库内的唯一事实源，`<dshHome>/.agent-presets/eng` 是启动时同步出来的副本——**不要直接编辑副本**，下次启动会被覆盖。跑 `node --test` 会顺带把源树同步进副本（漂移自检的一部分），所以改完预设先跑测试再重启。

@@ -57,6 +57,11 @@ window.__ModuleLoader__.load({
 			waitTitleSettled: '等待结束',
 			waitMore: '另有 {n} 个未展示',
 			waitResult: '结果',
+			dispatchDefaultModel: '默认模型',
+			dispatchBackground: '后台派发',
+			dispatchForeground: '前台等待',
+			dispatchPrompt: '提示词',
+			dispatchOmitted: '…已省略 {n} 字符',
 			treeLoading: '加载中…',
 			treeReadFailed: '读取失败',
 			treeLiveUnavailable: '实时不可用',
@@ -86,6 +91,11 @@ window.__ModuleLoader__.load({
 			waitTitleSettled: 'Wait finished',
 			waitMore: '{n} more not shown',
 			waitResult: 'Result',
+			dispatchDefaultModel: 'default model',
+			dispatchBackground: 'background dispatch',
+			dispatchForeground: 'foreground wait',
+			dispatchPrompt: 'Prompt',
+			dispatchOmitted: '…{n} characters omitted',
 			treeLoading: 'Loading…',
 			treeReadFailed: 'Read failed',
 			treeLiveUnavailable: 'Live updates unavailable',
@@ -140,6 +150,31 @@ window.__ModuleLoader__.load({
 				maxMessages: FOLLOW_MAX_MESSAGES,
 			};
 		}
+		/**
+		 * 本插件接管工具卡的全部 wire 工具名：官方 `wait_subagent` 加派发工具。
+		 * `subagent` 是 dsh-subagent-dispatch 的通用派发工具，其余是它在
+		 * `roles` 配置里注册的角色工具（本机 profile patch 的七个工程角色）。座位按
+		 * wire 工具名分发，没有 entry 认领的键从来不会出现——列多了只是几个空注册，
+		 * 列少了那个工具的卡就退回通用行。名字是配置事实：插件配置里加了角色，这里
+		 * 要跟着加。
+		 */
+		const DISPATCH_TOOL_NAMES = [
+			'subagent',
+			'researcher',
+			'scout',
+			'tdd-tester',
+			'implementer',
+			'reviewer',
+			'code-quality-reviewer',
+			'lark',
+		];
+
+		/**
+		 * 展开体里提示词的展示上限（字符）。派发提示词动辄数千字，整段灌进 DOM 只为
+		 * 了让人看到开头——超过这个长度截断，并在末尾如实报出省略了多少。
+		 */
+		const PROMPT_LIMIT = 4000;
+
 		/** "最后一行"展示上限（字符）。 */
 		const LAST_LINE_LIMIT = 120;
 		/** 秒/分钟分界：小于 90 秒报秒，否则报整分钟。 */
@@ -172,6 +207,12 @@ window.__ModuleLoader__.load({
 			resultLabel: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px' },
 			resultText: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--dsw-alias-label-secondary, #aaa)' },
 			resultFailed: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--dsw-alias-state-error-primary, #c33)' },
+			// 派发展开体的三块静态内容：描述、模型/前后台、提示词正文。与通用工具的
+			// 正文同款排版（纯文本行，次级色；提示词保留换行）。
+			dispatchDescription: { color: 'var(--dsw-alias-label-secondary, #aaa)' },
+			dispatchMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px' },
+			dispatchPrompt: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--dsw-alias-label-secondary, #aaa)' },
+			dispatchLabel: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px' },
 		};
 
 		/** 记一条诊断：外部插件的异常只能进 console，不能进渲染。 */
@@ -539,99 +580,129 @@ window.__ModuleLoader__.load({
 			}
 		}
 
-		/**
-		 * `wait_subagent` 的工具卡：**折叠态就是通用工具行**（`GenericToolCard`，与
-		 * bash 等工具同一套行组件、同一套展开/收起、同一套样式），只有展开体换成本
-		 * 插件提供的 `WaitSubagentBody`——被等待子代理的实时信息，而不是参数 JSON。
-		 *
-		 * 展开体由 `ToolRow` 的 `{open && children}` 渲染：收起时不挂载，所以流随展开
-		 * 建立、随收起释放，生命周期天然对齐，本插件不再自己维护折叠状态。
-		 *
-		 * harness 未导出 `GenericToolCard` 时降级：直接渲染展开体（自带一行摘要），
-		 * 功能不丢，只是少了通用行外壳。
-		 */
-		function WaitSubagentCard(props) {
-			const text = translator(props?.t);
-			const block = props?.block;
-			const settled = block !== null && typeof block === 'object' && block.kind === 'tool-result';
-			// 折叠摘要只用两种说法：等待 N 个子代理 / 已结束。通用行对"参数里没有可读
-			// 摘要键"的工具会把参数 JSON 当摘要（`wait_subagent` 正好是这种），而 Web
-			// 客户端不消费 host 的 presentCall，所以只能由接管展开体的这一侧给摘要。
-			const waited = waitedIds(settled ? block.call?.argsRaw : block?.argsRaw);
-			const summary = waited.ids.length === 0
-				? undefined
-				: settled ? text('treeInactive') : text('waitTitleRunning', { n: waited.ids.length });
-			const generic = uiToolModule !== null && typeof uiToolModule === 'object' && typeof uiToolModule.GenericToolCard === 'function'
-				? uiToolModule.GenericToolCard
-				: undefined;
-			const conversationText = conversationTranslator();
-			const standalone = generic === undefined || conversationText === undefined;
-			const body = h(WaitSubagentBody, {
-				block: props?.block,
-				sessionId: props?.sessionId,
-				useSessions: props?.useSessions,
-				text,
-				standalone,
-			});
-			if (standalone) return body;
-			return h(generic, {
-				callId: props?.callId,
-				toolName: props?.toolName,
-				block: props?.block,
-				cwd: props?.cwd,
-				home: props?.home,
-				openFile: props?.openFile,
-				loadImage: props?.loadImage,
-				inspect: props?.inspect,
-				t: conversationText,
-				summary,
-				bodyContent: body,
-			});
+		/** 非空字符串取值；空串、非字符串一律 undefined（调用方按"没有这一项"处理）。 */
+		function textField(value) {
+			return typeof value === 'string' && value !== '' ? value : undefined;
 		}
 
 		/**
-		 * 展开体：把工具参数里的每个 subagent id 渲染成一行实时信息（标签/状态/最后
-		 * 活动/最后一个工具/最后一行助手文本），而不是原始 JSON。
-		 *
-		 * 只对**运行中**的工具调用开流：等待中意味着这些子代理正在跑，所以名单上每个
-		 * id 各开一路 `remote.session.follow` 推送流；工具一旦结算就 diff 掉全部流
-		 * （结算后才挂载的历史卡不开任何流），并保留结束前已折叠出的最后信息。结果
-		 * 文本由通用行的 OUTPUT 段展示；standalone 降级时本组件自己补一行标题与结果。
-		 *
-		 * 只持有一个每秒的展示时钟（`now`），且只在有行要显示"最后活动"时才走：它只
-		 * 重渲染已有的时间戳，不取数据（内容仍由推送驱动），所以不是轮询。没有它，
-		 * "最后活动 N 秒前"会冻结在最后一次推送的时刻——一个正在跑但暂时没有新事件的
-		 * 子代理会被误读成"停住了"，恰好是这块卡要回答的问题。
-		 *
-		 * 流按 id 增量管理（`activeStreams` 里的 Map + `subscriptionDiff`）：名单或
-		 * mode 变化只会 start/stop 变化的那几路，其余流原样保留。
+		 * 工具调用的参数文本：运行中在 `block.argsRaw`，已结算是 `block.call?.argsRaw`
+		 * ——窗口截断让调用头落在它外面时 `call` 为 null，两条路径都可能缺席。
+		 * @param block - 工具块（运行中的调用或已结算的结果节点）。
+		 * @returns 原始参数文本，或 undefined。
 		 */
-		function WaitSubagentBody(props) {
-			const text = translator(props?.text);
-			const sessionId = typeof props?.sessionId === 'string' ? props.sessionId : undefined;
-			const block = props?.block;
-			const settled = block !== null && typeof block === 'object' && block.kind === 'tool-result';
-			// 取参路径：运行中是 block.argsRaw，已结算是 block.call?.argsRaw（窗口截断
-			// 让调用头落在窗口外时 call 为 null，两条路径都可能缺席）。
-			const argsRaw = settled ? block.call?.argsRaw : block?.argsRaw;
-			const waited = waitedIds(argsRaw);
-			// 目录只用来补标签/活动态/follow 地址的 mode；选择器抛错或缺席时退回共享
-			// 空目录，卡照常按 id 渲染。
-			const entries = childEntries(catalogFrom(props?.useSessions) ?? NO_CATALOG, sessionId);
+		function argsRawOf(block) {
+			if (block === null || typeof block !== 'object') return undefined;
+			return block.kind === 'tool-result' ? block.call?.argsRaw : block.argsRaw;
+		}
+
+		/**
+		 * 截到 limit 个 UTF-16 单元，但不在代理对中间切开：半个字形比少一个字符更难读。
+		 * @param value - 原文本。
+		 * @param limit - 上限（UTF-16 单元数）。
+		 * @returns 不超过 limit 的文本（未超长时原样返回）。
+		 */
+		function cutText(value, limit) {
+			const cut = value.slice(0, limit);
+			const last = cut.charCodeAt(cut.length - 1);
+			return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+		}
+
+		/**
+		 * 派发工具的调用参数：`subagent` 与各角色工具共用
+		 * `{ description, prompt, model?, run_in_background? }`。参数来自 JSON 边界
+		 * （流式写入中、调用头被窗口截断、历史日志），任何形状都不抛：畸形一律给空
+		 * 参数，由卡退回"只有工具名"的降级形态。
+		 *
+		 * @param argsRaw - 工具调用的原始参数文本（运行中取 block.argsRaw，已结算取
+		 *   block.call?.argsRaw；窗口截断时两条路径都可能缺席）。
+		 * @returns {{ description, prompt, model, background }} 前三个是字符串或
+		 *   undefined；background 为 true 表示后台派发（`run_in_background` 缺席时
+		 *   与插件默认一致：continuable 后台）。
+		 */
+		function dispatchArgs(argsRaw) {
+			const empty = { description: undefined, prompt: undefined, model: undefined, background: true };
+			if (typeof argsRaw !== 'string' || argsRaw === '') return empty;
+			let parsed;
+			try {
+				parsed = JSON.parse(argsRaw);
+			} catch {
+				// 流式写入的中间态：半个 JSON 解析不出任何字段。
+				return empty;
+			}
+			if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return empty;
+			return {
+				description: textField(parsed.description),
+				prompt: textField(parsed.prompt),
+				model: textField(parsed.model),
+				background: parsed.run_in_background !== false,
+			};
+		}
+
+		/**
+		 * 派发工具的折叠摘要：`工具名 · 模型 · 描述`。模型缺席时整段省掉（不留空
+		 * 分隔符），描述缺席时用压平成单行、截断到 LAST_LINE_LIMIT 的提示词顶上。
+		 * 两项都拿不到（参数还在流式写入、被窗口截断、或 JSON 畸形）时给 undefined
+		 * ——通用行会退回显示原始参数 JSON，与其它工具一致；这里不编一句空摘要。
+		 *
+		 * 通用行对没有可读摘要键的工具会把参数 JSON 当摘要（派发工具正是这种），所以
+		 * 摘要必须由接管展开体的这一侧给。
+		 *
+		 * @param toolName - 座位的 wire 工具名（props.toolName）。
+		 * @param args - dispatchArgs 的解析结果。
+		 * @returns 单行摘要，或 undefined。
+		 */
+		function dispatchSummary(toolName, args) {
+			const label = args?.description ?? clampText(args?.prompt);
+			if (label === undefined) return undefined;
+			return [textField(toolName) ?? 'subagent', args?.model, label]
+				.filter((segment) => segment !== undefined)
+				.join(' · ');
+		}
+
+		/**
+		 * 子会话 id 的形态：可选的 `session-` 前缀 + UUID，或 dsh-sdk 提供方那种
+		 * `session-` + 32 位无连字符 UUID。锚到 UUID 本体而不是 `session-` 之后的任意
+		 * 字符：正文里的 `session-persistence-sqlite` 这类词不是会话 id。
+		 */
+		const CHILD_ID_PATTERN = /\b(?:session-)?[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b|\bsession-[0-9a-f]{32}\b/i;
+
+		/**
+		 * 从已结算的返回文本里取第一个像子会话 id 的 token。派发工具成功时回
+		 * `started subagent <id>`（continuable）或子代理自己的收尾输出（前台）；
+		 * 后台 one-shot 回的是 job id，取不到——取不到就只是没有实时行。
+		 *
+		 * @param value - 结果文本。
+		 * @returns 会话 id，或 undefined。
+		 */
+		function childIdFromText(value) {
+			if (typeof value !== 'string' || value === '') return undefined;
+			const match = CHILD_ID_PATTERN.exec(value);
+			return match === null ? undefined : match[0];
+		}
+
+		/**
+		 * 多路 `remote.session.follow` 的共用机制：按目标清单增量开流，把帧折叠成每个
+		 * 子会话的展示状态，并在有"最后活动"可走动时持一个每秒的展示时钟。等待中的
+		 * `wait_subagent` 与已派发、仍在运行的子代理（派发工具的卡）共用它——两个卡
+		 * 只决定"当前该有哪些目标"，差分、abort、所有权守卫与定时器都在这里，没有
+		 * 第二套流实现。
+		 *
+		 * 必须在组件顶层无条件调用（hook 顺序）：目标为空集时它什么都不开。
+		 *
+		 * @param targets - 当前该有流的目标（{ parentSessionId, childSessionId, mode }）。
+		 * @returns {{ feeds, now, followAvailable }} feeds 按 childSessionId 索引；
+		 *   now 是展示时钟的当前毫秒值；followAvailable 是 `remote.session.follow`
+		 *   是否可用（调用方据此渲染"实时不可用"）。
+		 */
+		function useFollowFeeds(targets) {
 			const [feeds, setFeeds] = useState({});
 			// key → AbortController：当前活着的流。ref 而非 state——abort 句柄不进渲染。
 			const activeStreams = useRef(new Map());
 			const [now, setNow] = useState(() => Date.now());
-			const waiting = !settled && waited.ids.length > 0 && sessionId !== undefined;
-			// 本组件只在展开体里挂载（`ToolRow` 的 `{open && children}`）：挂载即开流，
-			// 收起/卸载即 abort。也避免为从不展开的卡付整段子代理日志的快照代价
-			// （子代理地址没有有界窗口，见 README 已知限制）。
-			const targets = waiting
-				? waited.ids.map((id) => ({ parentSessionId: sessionId, childSessionId: id, mode: entryMode(entries.get(id)) }))
-				: [];
 			// 流的身份 = 整份目标清单（父/子/mode）。用字符串做 effect 依赖：目录快照
 			// 的身份与流的存活无关，目标清单不变就不该重跑差分。
-			const targetsKey = targets.map(targetKey).join('\u0001');
+			const targetsKey = (Array.isArray(targets) ? targets : []).map(targetKey).join('\u0001');
 
 			// follow 服务是否可用：决定渲染哪条降级文案，并作为流 effect 的第二个依赖
 			// ——服务晚到一步时依赖翻转会让 effect 重跑，把该开的流补上（effect 自己
@@ -665,9 +736,9 @@ window.__ModuleLoader__.load({
 				});
 			};
 
-			// 每个被等待的 id 一路流；按 key 差分，只动变化的那几个：新目标开流、不再
-			// 需要的目标（名单变化、mode 变化、工具已结算、卡卸载）abort，其余 Map 里
-			// 的流原样留着。任一路失败只标该 id 的 status，其余流不受影响。
+			// 每个目标一路流；按 key 差分，只动变化的那几个：新目标开流、不再需要的
+			// 目标（名单/mode 变化、工具已结算、卡卸载）abort，其余 Map 里的流原样留着。
+			// 任一路失败只标该 id 的 status，其余流不受影响。
 			useEffect(() => {
 				const streams = activeStreams.current;
 				// 服务属性访问必须自带守卫：inject 缺席时 cordis 的反射代理在取属性
@@ -687,7 +758,7 @@ window.__ModuleLoader__.load({
 					sessionApi = undefined;
 					follow = undefined;
 				}
-				const desired = typeof follow === 'function' ? targets : [];
+				const desired = typeof follow === 'function' ? (Array.isArray(targets) ? targets : []) : [];
 				const { stop, start } = subscriptionDiff(streams.keys(), desired);
 				for (const key of stop) {
 					streams.get(key)?.abort();
@@ -718,8 +789,8 @@ window.__ModuleLoader__.load({
 							}
 						} catch (error) {
 							if (!owned(key, controller)) return;
-							// 一次机会：失败只标"读取失败"并记账，不自动重试——本卡唯一的
-							// 定时器是展示时钟，重连要额外的退避计时，留给下一次重挂。
+							// 一次机会：失败只标"读取失败"并记账，不自动重试——重连要
+							// 额外的退避计时，留给下一次重挂。
 							setFeed(target.childSessionId, { status: 'failed' });
 							logWarn(`follow ${target.childSessionId}`, error);
 							return;
@@ -746,46 +817,175 @@ window.__ModuleLoader__.load({
 				activeStreams.current.clear();
 			}, []);
 
+			return { feeds, now, followAvailable };
+		}
+
+		/**
+		 * 一行子代理实时信息：首行是标签（目录条目的 label，缺席用 id）加上状态与
+		 * "最后活动"，次行是最后一个工具与最后一行助手文本。等待中的 `wait_subagent`
+		 * 与派发工具的卡共用它。
+		 *
+		 * @param options - { id, entry, feed, now, streaming, liveUnavailable, text }。
+		 *   entry 是目录条目（可缺席）；feed 是该 id 的折叠状态；now 是展示时钟；
+		 *   streaming 表示这一行此刻有活流（决定"加载中"是不是残留）；
+		 *   liveUnavailable 表示整卡拿不到 follow 服务；text 是翻译函数。
+		 * @returns 行元素。
+		 */
+		function subagentRowElement(options) {
+			const { id, entry, feed, now, streaming, liveUnavailable, text } = options;
+			const label = typeof entry?.label === 'string' && entry.label !== '' ? entry.label : id;
+			// 状态只认目录快照：子代理的 running 位由 store 用推送帧折进已加载的目录
+			// （session-controller 的 updateCatalogActivity），所以这一列是实时的，
+			// 官方子代理界面同样只看这一处。快照里没有这个 id 就不声称状态（中性
+			// 圆点）——follow 流本身不携带 running 位，"流还开着"推断不出"还在跑"，
+			// 刚派发、尚未启动的子代理就会被说成运行中。
+			const activity = entryActivity(entry);
+			const parts = [];
+			if (feed?.lastTool !== undefined) parts.push(`${text('treeLastTool')} ${feed.lastTool}`);
+			if (feed?.lastText !== undefined) parts.push(feed.lastText);
+			// 已折叠出来的内容优先于状态文案：状态是"还没有内容"的说明，不是它的
+			// 替代品。这一行自己没内容时才轮到自己那一路的流状态；"实时不可用"
+			// 整卡说一次就够（它不属于某一行）。
+			let detail = parts.join(' · ');
+			// 没有活流时 `pending` 是"第一帧还没到"的残留（工具对早已完成的子代理会在
+			// 首帧到达前就返回），再显示"加载中"就是永久谎报。
+			if (detail === '') {
+				detail = feed?.status === 'failed'
+					? text('treeReadFailed')
+					: feed?.status === 'pending' && streaming ? text('treeLoading') : null;
+			}
+			if (detail === null && liveUnavailable) detail = text('treeLiveUnavailable');
+			if (detail === null) detail = '';
+			const age = feed?.lastTime === undefined ? undefined : formatAge(now - feed.lastTime);
+			const ageKey = age?.unit === 'hours' ? 'treeAgeHours' : age?.unit === 'minutes' ? 'treeAgeMinutes' : 'treeAgeSeconds';
+			// 与通用工具行的正文同一套排版：纯文本行，不引入第二套视觉（圆点/主色
+			// 标签/分栏），免得一条自造控件夹在标准"输入/输出"卡片上方。
+			const meta = [];
+			if (activity !== undefined) meta.push(text(activity === 'running' ? 'treeRunning' : 'treeInactive'));
+			if (age !== undefined) meta.push(`${text('treeLastActive')} ${text(ageKey, { n: age.value })}`);
+			return h('div', { key: id, style: styles.waitLine },
+				h('div', { style: styles.waitLineHead, title: id }, meta.length === 0 ? label : `${label} · ${meta.join(' · ')}`),
+				detail === '' ? null : h('div', { style: styles.waitLineDetail }, detail));
+		}
+
+		/**
+		 * standalone 降级（没有通用行外壳，结果没有 OUTPUT 段）时的结果块；有外壳时
+		 * 给 null——结果由通用行展示，与其它工具一致。
+		 *
+		 * @param block - 工具块。
+		 * @param text - 翻译函数。
+		 * @param standalone - 是否处于无通用行的降级形态。
+		 * @returns 结果元素，或 null。
+		 */
+		function resultSection(block, text, standalone) {
+			if (standalone !== true) return null;
+			if (block === null || typeof block !== 'object' || block.kind !== 'tool-result') return null;
+			const result = resultTextOf(block);
+			if (result === undefined) return null;
+			return h('div', { key: 'result', style: styles.resultBox },
+				h('div', { style: styles.resultLabel }, text('waitResult')),
+				h('div', { style: block.isError === true ? styles.resultFailed : styles.resultText }, result));
+		}
+
+		/**
+		 * 工具卡的共用外壳：**折叠态是 harness 的通用工具行**（`GenericToolCard`，与
+		 * bash 等工具同一套行组件、同一套展开/收起、同一套样式），展开体由本插件给。
+		 * 两个卡（`wait_subagent` 与派发工具）都走这里，接线只有这一份。
+		 *
+		 * 展开体由 `ToolRow` 的 `{open && children}` 渲染：收起时不挂载，所以流随展开
+		 * 建立、随收起释放，生命周期天然对齐，本插件不自己维护折叠状态。
+		 *
+		 * harness 未导出 `GenericToolCard`（旧版本）时降级：直接渲染展开体，功能不
+		 * 丢，只是少了通用行外壳——展开体因此需要知道自己处在哪种形态（`standalone`）。
+		 *
+		 * @param props - 座位 props：callId/toolName/block/cwd/home/openFile/loadImage/
+		 *   inspect 原样透传给通用行。
+		 * @param summary - 折叠行摘要；undefined 时通用行退回显示参数 JSON。
+		 * @param buildBody - `(standalone) => 展开体元素`。
+		 * @returns 卡元素（通用行，或降级时的展开体本身）。
+		 */
+		function genericToolShell(props, summary, buildBody) {
+			const generic = uiToolModule !== null && typeof uiToolModule === 'object' && typeof uiToolModule.GenericToolCard === 'function'
+				? uiToolModule.GenericToolCard
+				: undefined;
+			const conversationText = conversationTranslator();
+			const standalone = generic === undefined || conversationText === undefined;
+			const body = buildBody(standalone);
+			if (standalone) return body;
+			return h(generic, {
+				callId: props?.callId,
+				toolName: props?.toolName,
+				block: props?.block,
+				cwd: props?.cwd,
+				home: props?.home,
+				openFile: props?.openFile,
+				loadImage: props?.loadImage,
+				inspect: props?.inspect,
+				t: conversationText,
+				summary,
+				bodyContent: body,
+			});
+		}
+
+		/**
+		 * `wait_subagent` 的工具卡：折叠态是通用工具行，展开体是 `WaitSubagentBody`
+		 * ——被等待子代理的实时信息，而不是参数 JSON。
+		 */
+		function WaitSubagentCard(props) {
+			const text = translator(props?.t);
+			const block = props?.block;
+			const settled = block !== null && typeof block === 'object' && block.kind === 'tool-result';
+			// 折叠摘要只用两种说法：等待 N 个子代理 / 已结束。通用行对"参数里没有可读
+			// 摘要键"的工具会把参数 JSON 当摘要（`wait_subagent` 正好是这种），而 Web
+			// 客户端不消费 host 的 presentCall，所以只能由接管展开体的这一侧给摘要。
+			const waited = waitedIds(argsRawOf(block));
+			const summary = waited.ids.length === 0
+				? undefined
+				: settled ? text('treeInactive') : text('waitTitleRunning', { n: waited.ids.length });
+			return genericToolShell(props, summary, (standalone) => h(WaitSubagentBody, {
+				block: props?.block,
+				sessionId: props?.sessionId,
+				useSessions: props?.useSessions,
+				text,
+				standalone,
+			}));
+		}
+
+		/**
+		 * `wait_subagent` 的展开体：把工具参数里的每个 subagent id 渲染成一行实时信息
+		 * （标签/状态/最后活动/最后一个工具/最后一行助手文本），而不是原始 JSON。
+		 *
+		 * 只对**运行中**的工具调用开流：等待中意味着这些子代理正在跑，所以名单上每个
+		 * id 各开一路 `remote.session.follow` 推送流；工具一旦结算就 diff 掉全部流
+		 * （结算后才挂载的历史卡不开任何流），并保留结束前已折叠出的最后信息。结果
+		 * 文本由通用行的 OUTPUT 段展示；standalone 降级时本组件自己补一行标题与结果。
+		 *
+		 * 流与展示时钟都在 `useFollowFeeds` 里（与派发工具的卡共用），这里只决定
+		 * "当前该有哪些目标"：等待中的名单，每个 id 各一路。
+		 */
+		function WaitSubagentBody(props) {
+			const text = translator(props?.text);
+			const sessionId = typeof props?.sessionId === 'string' ? props.sessionId : undefined;
+			const block = props?.block;
+			const settled = block !== null && typeof block === 'object' && block.kind === 'tool-result';
+			const argsRaw = argsRawOf(block);
+			const waited = waitedIds(argsRaw);
+			// 目录只用来补标签/活动态/follow 地址的 mode；选择器抛错或缺席时退回共享
+			// 空目录，卡照常按 id 渲染。
+			const entries = childEntries(catalogFrom(props?.useSessions) ?? NO_CATALOG, sessionId);
+			const waiting = !settled && waited.ids.length > 0 && sessionId !== undefined;
+			// 本组件只在展开体里挂载（`ToolRow` 的 `{open && children}`）：挂载即开流，
+			// 收起/卸载即 abort。也避免为从不展开的卡付整段子代理日志的快照代价
+			// （子代理地址没有有界窗口，见 README 已知限制）。
+			const targets = waiting
+				? waited.ids.map((id) => ({ parentSessionId: sessionId, childSessionId: id, mode: entryMode(entries.get(id)) }))
+				: [];
+			const { feeds, now, followAvailable } = useFollowFeeds(targets);
 			const liveUnavailable = waiting && !followAvailable;
 
-			const renderRow = (id) => {
-				const entry = entries.get(id);
-				const feed = feeds[id];
-				const label = typeof entry?.label === 'string' && entry.label !== '' ? entry.label : id;
-				// 状态只认目录快照：子代理的 running 位由 store 用推送帧折进已加载的目录
-				// （session-controller 的 updateCatalogActivity），所以这一列是实时的，
-				// 官方子代理界面同样只看这一处。快照里没有这个 id 就不声称状态（中性
-				// 圆点）——follow 流本身不携带 running 位，"流还开着"推断不出"还在跑"，
-				// 刚派发、尚未启动的子代理就会被说成运行中。
-				const activity = entryActivity(entry);
-				const parts = [];
-				if (feed?.lastTool !== undefined) parts.push(`${text('treeLastTool')} ${feed.lastTool}`);
-				if (feed?.lastText !== undefined) parts.push(feed.lastText);
-				// 已折叠出来的内容优先于状态文案：状态是"还没有内容"的说明，不是它的
-				// 替代品。这一行自己没内容时才轮到自己那一路的流状态；"实时不可用"
-				// 整卡说一次就够（它不属于某一行）。
-				let detail = parts.join(' · ');
-				// 结算后不再有活流能改写 feed：此时 `pending` 是"结算前第一帧还没到"
-				// 的残留（工具对早已完成的子代理会在首帧到达前就返回），再显示"加载中"
-				// 就是永久谎报。结算态下 pending 一律按"没有内容"处理。
-				if (detail === '') {
-					detail = feed?.status === 'failed'
-						? text('treeReadFailed')
-						: feed?.status === 'pending' && !settled ? text('treeLoading') : null;
-				}
-				if (detail === null && liveUnavailable) detail = text('treeLiveUnavailable');
-				if (detail === null) detail = '';
-				const age = feed?.lastTime === undefined ? undefined : formatAge(now - feed.lastTime);
-				const ageKey = age?.unit === 'hours' ? 'treeAgeHours' : age?.unit === 'minutes' ? 'treeAgeMinutes' : 'treeAgeSeconds';
-				// 与通用工具行的正文同一套排版：纯文本行，不引入第二套视觉（圆点/主色
-				// 标签/分栏），免得一条自造控件夹在标准"输入/输出"卡片上方。
-				const meta = [];
-				if (activity !== undefined) meta.push(text(activity === 'running' ? 'treeRunning' : 'treeInactive'));
-				if (age !== undefined) meta.push(`${text('treeLastActive')} ${text(ageKey, { n: age.value })}`);
-				return h('div', { key: id, style: styles.waitLine },
-					h('div', { style: styles.waitLineHead, title: id }, meta.length === 0 ? label : `${label} · ${meta.join(' · ')}`),
-					detail === '' ? null : h('div', { style: styles.waitLineDetail }, detail));
-			};
+			const renderRow = (id) => subagentRowElement({
+				id, entry: entries.get(id), feed: feeds[id], now, streaming: waiting, liveUnavailable, text,
+			});
 
 			// 工具已结束：展开体留空，展开后就是标准的「输出」卡片（和其它工具结算后
 			// 一模一样）。实时行只在等待中才有信息量。
@@ -811,16 +1011,93 @@ window.__ModuleLoader__.load({
 			}
 			// 结果文本：有通用行外壳时由它的 OUTPUT 段展示（与其它工具一致），
 			// standalone 降级时自己补一块，保证结果永远可见。
-			const result = settled ? resultTextOf(block) : undefined;
-			if (result !== undefined && props?.standalone === true) {
-				children.push(h('div', { key: 'result', style: styles.resultBox },
-					h('div', { style: styles.resultLabel }, text('waitResult')),
-					h('div', { style: block.isError === true ? styles.resultFailed : styles.resultText }, result)));
-			}
+			const result = resultSection(block, text, props?.standalone);
+			if (result !== null) children.push(result);
 
 			return h('div', { style: styles.body }, children);
 		}
 
+		/**
+		 * 派发工具（`subagent` 与各角色工具）的工具卡：与 `wait_subagent` 同一套外壳
+		 * ——折叠态是通用工具行，展开体是 `DispatchToolBody`。摘要由这一侧给（通用行
+		 * 读不出 `description`/`prompt`，会把整个参数 JSON 当摘要显示）。
+		 */
+		function DispatchToolCard(props) {
+			const block = props?.block;
+			const settled = block !== null && typeof block === 'object' && block.kind === 'tool-result';
+			const args = dispatchArgs(argsRawOf(block));
+			const text = translator(props?.t);
+			return genericToolShell(props, dispatchSummary(props?.toolName, args), (standalone) => h(DispatchToolBody, {
+				block: props?.block,
+				sessionId: props?.sessionId,
+				useSessions: props?.useSessions,
+				toolName: props?.toolName,
+				text,
+				standalone,
+			}));
+		}
+
+		/**
+		 * 派发工具的展开体：描述、模型与前后台、提示词正文，以及**这次派发出来的
+		 * 子代理**那一行实时信息——而不是参数 JSON。
+		 *
+		 * 子代理 id 从已结算的返回文本里解析（`started subagent <id>`）：取不到就只显示
+		 * 前三块，不开流也不报错。id 还要在目录快照里认领得到（本会话的直接子代理）
+		 * 才成行——正则只是形状匹配，前台派发的返回文本是子代理自己的输出，里面可能
+		 * 正好有一个 UUID；目录是"这个 id 真的是我派出去的"的唯一依据。
+		 *
+		 * 订阅要三个事实同时成立——卡在展开体里挂载（本组件只在展开时挂载）、目录认领
+		 * 这个 id、且目录说它**仍在运行**。目录说已结束时不订阅：流本身不携带 running
+		 * 位，"流还开着"推断不出"还在跑"，而给一个已经跑完的子代理回放整段日志不值得
+		 * （见 README 已知限制）。此时那一行照常显示（状态列写"已结束"），结束前折叠出
+		 * 的信息一并留在上面。
+		 */
+		function DispatchToolBody(props) {
+			const text = translator(props?.text);
+			const sessionId = typeof props?.sessionId === 'string' ? props.sessionId : undefined;
+			const block = props?.block;
+			const settled = block !== null && typeof block === 'object' && block.kind === 'tool-result';
+			const args = dispatchArgs(argsRawOf(block));
+			// 目录与等待卡同一份来源：标签/状态/follow 地址的 mode 都取自快照。
+			const entries = childEntries(catalogFrom(props?.useSessions) ?? NO_CATALOG, sessionId);
+			const childId = settled ? childIdFromText(resultTextOf(block)) : undefined;
+			const entry = childId === undefined ? undefined : entries.get(childId);
+			const running = entry !== undefined && entryActivity(entry) === 'running';
+			const targets = running && sessionId !== undefined
+				? [{ parentSessionId: sessionId, childSessionId: childId, mode: entryMode(entry) }]
+				: [];
+			const { feeds, now, followAvailable } = useFollowFeeds(targets);
+			const prompt = args.prompt === undefined ? undefined : cutText(args.prompt, PROMPT_LIMIT);
+			const omitted = args.prompt === undefined ? 0 : args.prompt.length - prompt.length;
+
+			const children = [];
+			// standalone 降级（没有通用行外壳）时补一行摘要，替代工具行的折叠摘要。
+			if (props?.standalone === true) {
+				children.push(h('div', { key: 'head', style: styles.standaloneHead },
+					dispatchSummary(props?.toolName, args) ?? textField(props?.toolName) ?? 'subagent'));
+			}
+			if (args.description !== undefined) {
+				children.push(h('div', { key: 'description', style: styles.dispatchDescription }, args.description));
+			}
+			// 元信息行：模型缺席时说"默认模型"（插件按白名单的 defaultModel 解析），
+			// `run_in_background` 缺席即后台派发。
+			children.push(h('div', { key: 'meta', style: styles.dispatchMeta },
+				`${args.model ?? text('dispatchDefaultModel')} · ${text(args.background ? 'dispatchBackground' : 'dispatchForeground')}`));
+			if (prompt !== undefined) {
+				children.push(h('div', { key: 'promptLabel', style: styles.dispatchLabel }, text('dispatchPrompt')));
+				children.push(h('div', { key: 'prompt', style: styles.dispatchPrompt }, prompt));
+				if (omitted > 0) children.push(h('div', { key: 'omitted', style: styles.dispatchLabel }, text('dispatchOmitted', { n: omitted })));
+			}
+			if (entry !== undefined) {
+				children.push(subagentRowElement({
+					id: childId, entry, feed: feeds[childId], now, streaming: running, liveUnavailable: running && !followAvailable, text,
+				}));
+			}
+			const result = resultSection(block, text, props?.standalone);
+			if (result !== null) children.push(result);
+
+			return h('div', { style: styles.body }, children);
+		}
 		/**
 		 * 客户端服务依赖：实时内容来自 `ctx.get('remote.session')`（网关按命名空间
 		 * 注册的独立服务，取属性要通过 inject 检查，故必须成对声明——官方客户端
@@ -855,19 +1132,30 @@ window.__ModuleLoader__.load({
 				}
 			});
 			ctx.slots.inject('tool.call.toolview', () => {
-				try {
-					// key 是 wire 工具名本身：这个座位按工具名分发，注册即接管
-					// `wait_subagent` 的工具卡（没有 entry 认领的键才退回通用工具行）。
-					return ctx.slots.register({
-						name: 'tool.call.toolview',
-						key: 'wait_subagent',
-						order: 10,
-						locale: NS,
-					}, WaitSubagentCard);
-				} catch (error) {
-					logWarn('register wait_subagent card', error);
-					return () => {};
+				// key 是 wire 工具名本身：这个座位按工具名分发，注册即接管该工具的卡
+				// （没有 entry 认领的键才退回通用工具行）。每个键一份注册、各自
+				// try/catch——一个键注册失败不得让其余键失去卡。注册项除 key 与组件
+				// 外逐字相同：`wait_subagent` 用自己的展开体，派发工具共用一份。
+				const seats = [
+					{ key: 'wait_subagent', component: WaitSubagentCard },
+					...DISPATCH_TOOL_NAMES.map((key) => ({ key, component: DispatchToolCard })),
+				];
+				const disposers = [];
+				for (const seat of seats) {
+					try {
+						disposers.push(ctx.slots.register({
+							name: 'tool.call.toolview',
+							key: seat.key,
+							order: 10,
+							locale: NS,
+						}, seat.component));
+					} catch (error) {
+						logWarn(`register ${seat.key} card`, error);
+					}
 				}
+				return () => {
+					for (const dispose of disposers) dispose();
+				};
 			});
 		}
 
@@ -891,6 +1179,8 @@ window.__ModuleLoader__.load({
 		exports.__test = {
 			foldEvents, formatAge, followRequest, subscriptionDiff, targetKey, targetRecords,
 			waitedIds, WaitSubagentCard, WaitSubagentBody,
+			childIdFromText, dispatchArgs, dispatchSummary, dispatchToolNames: DISPATCH_TOOL_NAMES,
+			DispatchToolCard, DispatchToolBody, PROMPT_LIMIT,
 			zh, en,
 		};
 		return module.exports;
