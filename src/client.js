@@ -27,6 +27,15 @@ window.__ModuleLoader__.load({
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
+		// 复用官方通用工具行组件（`GenericToolCard`）：折叠态与 bash 等工具完全同源，
+		// 本插件只提供展开体。导出缺席（旧 harness）时降级为自带渲染。
+		let uiToolModule;
+		try {
+			uiToolModule = require('@deepseek-ai/dsh-client-ui-tool');
+		} catch (error) {
+			logWarn('ui-tool module', error);
+		}
+
 		const { createElement: h, useEffect, useRef, useState } = require('react');
 
 		const NS = 'eng-panel';
@@ -150,14 +159,10 @@ window.__ModuleLoader__.load({
 			button: { font: 'inherit', cursor: 'pointer', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: '6px', background: 'var(--dsw-alias-bg-layer-1, transparent)', color: 'inherit', padding: '4px 12px' },
 			ok: { color: 'var(--dsw-alias-state-success-primary, #3c3)', fontSize: '13px' },
 			error: { color: 'var(--dsw-alias-state-error-primary, #c33)', fontSize: '13px' },
-			card: { display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '13px', color: 'var(--dsw-alias-label-primary, inherit)' },
-			// 折叠头：与工具行同构的一行——状态点、工具名、摘要、右端箭头。
-			rowHead: { display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '2px 0', border: 'none', background: 'transparent', color: 'inherit', font: 'inherit', cursor: 'pointer', textAlign: 'left' },
-			rowTitle: { fontWeight: 600, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px' },
-			rowSummary: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 },
-			rowChevron: { marginLeft: 'auto', color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '11px' },
-			body: { display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '4px' },
-			dotError: { color: 'var(--dsw-alias-state-error-primary, #c33)', fontSize: '10px' },
+			// 展开体容器：展开后由通用行的 bodyWrap 承载，这里只负责行间距。
+			body: { display: 'flex', flexDirection: 'column', gap: '6px' },
+			// standalone 降级时的一行摘要（正常路径下摘要由通用行的折叠行提供）。
+			standaloneHead: { fontWeight: 600 },
 			waitRow: { display: 'flex', flexDirection: 'column', gap: '2px' },
 			waitRowHead: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 },
 			waitLabel: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '260px' },
@@ -527,25 +532,74 @@ window.__ModuleLoader__.load({
 					state.saveError !== undefined ? h('span', { style: styles.error }, t('saveFailed') + state.saveError) : null));
 		}
 
+		/** conversation 命名空间的翻译函数：通用行自己用它取文案（工具名、输入/输出…）。 */
+		function conversationTranslator() {
+			try {
+				return typeof clientCtx?.locale?.bind === 'function' ? clientCtx.locale.bind('conversation') : undefined;
+			} catch (error) {
+				logWarn('locale.bind(conversation)', error);
+				return undefined;
+			}
+		}
+
 		/**
-		 * `wait_subagent` 的工具卡：把工具参数里的每个 subagent id 渲染成一行实时
-		 * 信息（标签/状态/最后活动/最后一个工具/最后一行助手文本），而不是原始 JSON。
+		 * `wait_subagent` 的工具卡：**折叠态就是通用工具行**（`GenericToolCard`，与
+		 * bash 等工具同一套行组件、同一套展开/收起、同一套样式），只有展开体换成本
+		 * 插件提供的 `WaitSubagentBody`——被等待子代理的实时信息，而不是参数 JSON。
 		 *
-		 * 只对**运行中**的工具调用开流：等待中意味着这些子代理正在跑，所以名单上
-		 * 每个 id 各开一路 `remote.session.follow` 推送流；工具一旦结算就 diff 掉全部
-		 * 流（结算后才挂载的卡，例如从窗口外滚回来的历史卡，不开任何流），卡上保留
-		 * 结束前已折叠出的最后信息，并显示工具的返回文本。
+		 * 展开体由 `ToolRow` 的 `{open && children}` 渲染：收起时不挂载，所以流随展开
+		 * 建立、随收起释放，生命周期天然对齐，本插件不再自己维护折叠状态。
 		 *
-		 * 卡只持有一个每秒的展示时钟（见组件内的 `now`），且只在有行要显示"最后活动"
-		 * 时才走：它只重渲染已有的时间戳，不取数据（内容仍由推送驱动），所以不是轮询。
-		 * 没有它，"最后活动 N 秒前"会冻结在最后一次推送的时刻——一个正在跑但暂时没有
-		 * 新事件的子代理会被误读成"停住了"，恰好是这块卡要回答的问题。
+		 * harness 未导出 `GenericToolCard` 时降级：直接渲染展开体（自带一行摘要），
+		 * 功能不丢，只是少了通用行外壳。
+		 */
+		function WaitSubagentCard(props) {
+			const generic = uiToolModule !== null && typeof uiToolModule === 'object' && typeof uiToolModule.GenericToolCard === 'function'
+				? uiToolModule.GenericToolCard
+				: undefined;
+			const conversationText = conversationTranslator();
+			const standalone = generic === undefined || conversationText === undefined;
+			const body = h(WaitSubagentBody, {
+				block: props?.block,
+				sessionId: props?.sessionId,
+				useSessions: props?.useSessions,
+				text: translator(props?.t),
+				standalone,
+			});
+			if (standalone) return body;
+			return h(generic, {
+				callId: props?.callId,
+				toolName: props?.toolName,
+				block: props?.block,
+				cwd: props?.cwd,
+				home: props?.home,
+				openFile: props?.openFile,
+				loadImage: props?.loadImage,
+				inspect: props?.inspect,
+				t: conversationText,
+				bodyContent: body,
+			});
+		}
+
+		/**
+		 * 展开体：把工具参数里的每个 subagent id 渲染成一行实时信息（标签/状态/最后
+		 * 活动/最后一个工具/最后一行助手文本），而不是原始 JSON。
+		 *
+		 * 只对**运行中**的工具调用开流：等待中意味着这些子代理正在跑，所以名单上每个
+		 * id 各开一路 `remote.session.follow` 推送流；工具一旦结算就 diff 掉全部流
+		 * （结算后才挂载的历史卡不开任何流），并保留结束前已折叠出的最后信息。结果
+		 * 文本由通用行的 OUTPUT 段展示；standalone 降级时本组件自己补一行标题与结果。
+		 *
+		 * 只持有一个每秒的展示时钟（`now`），且只在有行要显示"最后活动"时才走：它只
+		 * 重渲染已有的时间戳，不取数据（内容仍由推送驱动），所以不是轮询。没有它，
+		 * "最后活动 N 秒前"会冻结在最后一次推送的时刻——一个正在跑但暂时没有新事件的
+		 * 子代理会被误读成"停住了"，恰好是这块卡要回答的问题。
 		 *
 		 * 流按 id 增量管理（`activeStreams` 里的 Map + `subscriptionDiff`）：名单或
 		 * mode 变化只会 start/stop 变化的那几路，其余流原样保留。
 		 */
-		function WaitSubagentCard(props) {
-			const text = translator(props?.t);
+		function WaitSubagentBody(props) {
+			const text = translator(props?.text);
 			const sessionId = typeof props?.sessionId === 'string' ? props.sessionId : undefined;
 			const block = props?.block;
 			const settled = block !== null && typeof block === 'object' && block.kind === 'tool-result';
@@ -557,17 +611,14 @@ window.__ModuleLoader__.load({
 			// 空目录，卡照常按 id 渲染。
 			const entries = childEntries(catalogFrom(props?.useSessions) ?? NO_CATALOG, sessionId);
 			const [feeds, setFeeds] = useState({});
-			// 折叠态：与通用工具行一致，默认收起。收起时只有一行摘要，不订阅、不渲染
-			// 实时行——展开才是这张卡的全部内容（也正是它存在的理由）。
-			const [open, setOpen] = useState(false);
 			// key → AbortController：当前活着的流。ref 而非 state——abort 句柄不进渲染。
 			const activeStreams = useRef(new Map());
 			const [now, setNow] = useState(() => Date.now());
 			const waiting = !settled && waited.ids.length > 0 && sessionId !== undefined;
-			// 收起时不开流：既符合"折叠不动"的语义，也避免为从不展开的卡付整段子代理
-			// 日志的快照代价（子代理地址没有有界窗口，见 README 已知限制）。
-			const streaming = waiting && open;
-			const targets = streaming
+			// 本组件只在展开体里挂载（`ToolRow` 的 `{open && children}`）：挂载即开流，
+			// 收起/卸载即 abort。也避免为从不展开的卡付整段子代理日志的快照代价
+			// （子代理地址没有有界窗口，见 README 已知限制）。
+			const targets = waiting
 				? waited.ids.map((id) => ({ parentSessionId: sessionId, childSessionId: id, mode: entryMode(entries.get(id)) }))
 				: [];
 			// 流的身份 = 整份目标清单（父/子/mode）。用字符串做 effect 依赖：目录快照
@@ -687,7 +738,7 @@ window.__ModuleLoader__.load({
 				activeStreams.current.clear();
 			}, []);
 
-			const liveUnavailable = streaming && !followAvailable;
+			const liveUnavailable = waiting && !followAvailable;
 
 			const renderRow = (id) => {
 				const entry = entries.get(id);
@@ -728,12 +779,14 @@ window.__ModuleLoader__.load({
 			};
 
 			const children = [];
-			const title = typeof props?.toolName === 'string' && props.toolName !== '' ? props.toolName : 'wait_subagent';
-			const headTitle = waited.ids.length > 0
-				? text(settled ? 'waitTitleSettled' : 'waitTitleRunning', { n: waited.ids.length })
-				: clampText(argsRaw) ?? '';
-			// 收起态只有这一行：标题 + 摘要（+ 被截断的条数）。展开体才是实时行。
-			const summary = waited.truncated > 0 ? `${headTitle} · ${text('waitMore', { n: waited.truncated })}` : headTitle;
+			// standalone 降级（没有通用行外壳）时补一行摘要，替代工具行的折叠摘要。
+			if (props?.standalone === true) {
+				const heading = waited.ids.length > 0
+					? text(settled ? 'waitTitleSettled' : 'waitTitleRunning', { n: waited.ids.length })
+					: typeof props?.toolName === 'string' && props.toolName !== '' ? props.toolName : 'wait_subagent';
+				children.push(h('div', { key: 'head', style: styles.standaloneHead }, heading));
+			}
+			if (waited.truncated > 0) children.push(h('div', { key: 'more', style: styles.fallbackArgs }, text('waitMore', { n: waited.truncated })));
 			if (waited.ids.length > 0) {
 				children.push(...waited.ids.map(renderRow));
 			} else {
@@ -743,29 +796,16 @@ window.__ModuleLoader__.load({
 				const argsTitle = typeof argsRaw === 'string' && argsRaw !== '' ? argsRaw : undefined;
 				if (argsText !== undefined) children.push(h('div', { key: 'args', style: styles.fallbackArgs, title: argsTitle }, argsText));
 			}
+			// 结果文本：有通用行外壳时由它的 OUTPUT 段展示（与其它工具一致），
+			// standalone 降级时自己补一块，保证结果永远可见。
 			const result = settled ? resultTextOf(block) : undefined;
-			if (result !== undefined) {
+			if (result !== undefined && props?.standalone === true) {
 				children.push(h('div', { key: 'result', style: styles.resultBox },
 					h('div', { style: styles.resultLabel }, text('waitResult')),
 					h('div', { style: block.isError === true ? styles.resultFailed : styles.resultText }, result)));
 			}
 
-			// 折叠头与通用工具行同构：状态点 + 工具名 + 摘要 + 折叠箭头。折叠态与
-			// 通用行一样是一行；展开后不是参数 JSON，而是被等待子代理的实时信息。
-			const stateStyle = waiting ? styles.dotRunning : block?.isError === true ? styles.dotError : styles.dotIdle;
-			return h('div', { style: styles.card, role: 'group', 'aria-label': title },
-				h('button', {
-					type: 'button',
-					style: styles.rowHead,
-					onClick: () => setOpen((value) => !value),
-					'aria-expanded': open,
-					title,
-				},
-					h('span', { style: stateStyle }, '●'),
-					h('span', { style: styles.rowTitle }, title),
-					summary === '' ? null : h('span', { style: styles.rowSummary }, summary),
-					h('span', { style: styles.rowChevron }, open ? '▾' : '▸')),
-				open ? h('div', { style: styles.body }, children) : null);
+			return h('div', { style: styles.body }, children);
 		}
 
 		/**
@@ -837,7 +877,7 @@ window.__ModuleLoader__.load({
 		 */
 		exports.__test = {
 			foldEvents, formatAge, followRequest, subscriptionDiff, targetKey, targetRecords,
-			waitedIds, WaitSubagentCard,
+			waitedIds, WaitSubagentCard, WaitSubagentBody,
 			zh, en,
 		};
 		return module.exports;

@@ -46,9 +46,26 @@ const react = {
   useState: (...args) => runtime.useState(...args),
 }
 
+/**
+ * 通用工具行存根：折叠/展开归 harness 的 `ToolRow`（本插件的测试不覆盖它），这里
+ * 只钉"展开体被作为 `bodyContent` 交给通用行、并带上 conversation 的翻译函数"。
+ */
+function genericToolCardStub(props) {
+  // 不渲染 bodyContent：生产里 `ToolRow` 是 `{open && children}`，收起时展开体
+  // 根本不挂载；这把"折叠时不订阅"的语义留给 harness，也保证本文件里实时行的
+  // 断言都打在展开体组件上。
+  return react.createElement('div', {
+    'data-generic-tool-card': props.toolName,
+    'data-generic-body': props.bodyContent !== undefined,
+    'data-generic-t': typeof props.t,
+  })
+}
+const uiToolStub = { GenericToolCard: genericToolCardStub }
+
 const client = definition.factory((name) => {
-  assert.equal(name, 'react')
-  return react
+  if (name === 'react') return react
+  if (name === '@deepseek-ai/dsh-client-ui-tool') return uiToolStub
+  throw new Error('unexpected external "' + name + '"')
 })
 
 const { zh, en } = client.__test
@@ -89,7 +106,7 @@ test('工厂：注册包名行并导出 inject/apply/__test 接缝', () => {
   assert.equal(typeof client.apply, 'function')
   assert.deepEqual(client.inject, ['slots', 'locale', 'remote', 'remote.session'])
   assert.deepEqual(Object.keys(client.__test).sort(), [
-    'WaitSubagentCard', 'en', 'foldEvents', 'followRequest', 'formatAge',
+    'WaitSubagentBody', 'WaitSubagentCard', 'en', 'foldEvents', 'followRequest', 'formatAge',
     'subscriptionDiff', 'targetKey', 'targetRecords', 'waitedIds', 'zh',
   ])
 })
@@ -712,56 +729,50 @@ function cardProps({ block, catalog, sessionId = 'root', toolName = 'wait_subage
 /** 每行"最后活动 N <秒/分钟/小时>前"的形态（数字由展示时钟决定）。 */
 const AGE_LINE = new RegExp(`^${zh.treeLastActive} \\d+ (秒|分钟|小时)前$`)
 
-/** 卡片折叠头（带 aria-expanded 的那个按钮）。 */
-function foldHeader(view) {
-  return findElement(view.tree, (node) => node.type === 'button' && node.props['aria-expanded'] !== undefined)
-}
-
 /**
- * 展开折叠卡。默认收起是契约的一部分：只关心"展开后内容"的用例统一经这里，
- * 要钉折叠态本身的用例自己管展开。
- * @param view - 已挂载的卡驱动。
- * @returns 同一个驱动。
+ * 挂载展开体。折叠/展开由 harness 的通用行（`ToolRow` 的 `{open && children}`）
+ * 负责，所以实时行的断言直接打在 `WaitSubagentBody` 上；折叠态本身由下面的
+ * 适配器用例钉。
  */
-async function expandCard(view) {
-  const head = foldHeader(view)
-  assert.notEqual(head, undefined, 'the card renders its fold header')
-  head.props.onClick()
-  await view.flush()
-  return view
-}
-
-/** 挂载并展开折叠卡。 */
 async function mountCardOpen(mount, props) {
-  return expandCard(await mount(client.__test.WaitSubagentCard, props))
+  return mount(client.__test.WaitSubagentBody, { ...props, text: props.t, standalone: false })
 }
 
-test('卡片：默认收起——折叠态只有一行且不订阅，展开才开流，收起即释放', async (t) => {
+test('卡片：折叠行交给 harness 的通用行——展开体作为 bodyContent 传下去', async (t) => {
   const { mount } = useReactRuntime(t)
   const { remote, calls } = makeRemote()
   applyWith({ 'remote.session': remote })
 
   const catalog = catalogWith([child('a'), child('b')])
   const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']), catalog }))
-  const collapsed = textOf(view.tree).join('\n')
-  assert.equal(collapsed.includes(zh.waitTitleRunning.replace('{n}', '2')), true, 'the collapsed line carries the summary')
-  assert.equal(collapsed.includes(zh.treeRunning), false, 'no live rows while collapsed')
-  assert.equal(calls.length, 0, 'a collapsed card opens no stream')
+  const row = findElement(view.tree, (node) => node.props?.['data-generic-tool-card'] !== undefined)
+  assert.notEqual(row, undefined, 'the adapter renders the harness generic row (never its own chrome)')
+  assert.equal(row.props['data-generic-tool-card'], 'wait_subagent', 'the row keeps the wire tool name')
+  assert.equal(row.props['data-generic-body'], true, 'the live body travels as bodyContent')
+  assert.equal(row.props['data-generic-t'], 'function', 'the conversation translator rides along for the row labels')
+  // 展开体只在通用行展开时才挂载（ToolRow 的 {open && children}），所以这里尚未开流。
+  assert.equal(calls.length, 0, 'nothing subscribes until the harness expands the row')
+})
 
-  const head = foldHeader(view)
-  assert.notEqual(head, undefined, 'the collapsed card still exposes its fold header')
-  assert.equal(head.props['aria-expanded'], false, 'collapsed by default')
-  head.props.onClick()
-  await view.flush()
-  assert.equal(calls.length, 2, 'expanding opens one stream per id')
-  assert.equal(textOf(view.tree).join('\n').includes(zh.treeRunning), true, 'the live rows render once expanded')
+test('卡片：没有通用行导出时降级——摘要与结果仍然可见', async (t) => {
+  const { mount } = useReactRuntime(t)
+  applyWith({ 'remote.session': {} })
 
-  const expanded = foldHeader(view)
-  assert.equal(expanded.props['aria-expanded'], true, 'the header reports the expanded state')
-  expanded.props.onClick()
-  await view.flush()
-  assert.equal(calls.every((call) => call.signal.aborted === true), true, 'collapsing aborts its streams')
-  assert.equal(textOf(view.tree).join('\n').includes(zh.treeRunning), false, 'the live rows leave with the collapse')
+  const running = await mount(client.__test.WaitSubagentBody, {
+    ...cardProps({ block: runningBlock(['a', 'b']) }),
+    text: (key, params) => (params === undefined ? (zh[key] ?? key) : (zh[key] ?? key).replace(/\{n\}/g, String(params.n))),
+    standalone: true,
+  })
+  assert.equal(textOf(running.tree).join('\n').includes(zh.waitTitleRunning.replace('{n}', '2')), true, 'the fallback renders its own summary line')
+
+  const settled = await mount(client.__test.WaitSubagentBody, {
+    ...cardProps({ block: settledBlock({ ids: ['a'], result: 'subagent a done' }) }),
+    text: (key, params) => (params === undefined ? (zh[key] ?? key) : (zh[key] ?? key).replace(/\{n\}/g, String(params.n))),
+    standalone: true,
+  })
+  const lines = textOf(settled.tree).join('\n')
+  assert.equal(lines.includes(zh.waitTitleSettled.replace('{n}', '1')), true, 'the fallback states the settled summary')
+  assert.equal(lines.includes('subagent a done'), true, 'the fallback shows the result itself (no harness OUTPUT section)')
 })
 
 test('卡片：运行中为每个 id 开一路流（mode 取目录，查不到按 continuable），推帧落到对应行', async (t) => {
@@ -783,7 +794,6 @@ test('卡片：运行中为每个 id 开一路流（mode 取目录，查不到�
   assert.equal(calls.every((call) => call.signal.aborted === false), true)
 
   const initial = textOf(view.tree)
-  assert.equal(initial.includes('等待 2 个子代理'), true, 'running title carries the count')
   assert.equal(initial.includes('A'), true, 'label comes from the catalog')
   assert.equal(initial.includes('b'), true, 'a diagnostic entry is not a row, so the id stands in for it')
   assert.equal(initial.filter((line) => line === zh.treeLoading).length, 2, 'both rows wait for their first frame')
@@ -858,10 +868,7 @@ test('卡片：工具结算即 abort 全部流、保留结束前的信息、显�
   assert.equal(calls[0].aborted, true, 'settling releases the stream')
   assert.equal(calls.length, 1, 'settling opens nothing new')
   const lines = textOf(view.tree)
-  assert.equal(lines.includes(zh.waitTitleSettled), true, 'settled title replaces the running one')
   assert.equal(lines.includes('收尾中'), true, 'the folded info survives settlement')
-  assert.equal(lines.includes(zh.waitResult), true, 'result label')
-  assert.equal(lines.includes(result), true, 'tool result text is shown verbatim')
 
   // 目录推送导致的重复渲染也不重开任何一路。
   await view.rerender(cardProps({ block: settledBlock({ ids: ['a'], result }), catalog: catalogWith([child('a', { label: 'A' })]) }))
@@ -880,9 +887,7 @@ test('卡片：结算后才挂载的历史卡不回放任何流，只显示返�
   }))
   assert.equal(calls.length, 0, 'a settled card never opens a stream')
   const lines = textOf(view.tree)
-  assert.equal(lines.includes('等待结束'), true)
   assert.equal(lines.includes('Y'), true, 'the id row is still listed')
-  assert.equal(lines.includes(result), true)
 })
 
 test('卡片：参数畸形/名单为空时退回朴素行，且不开任何流', async (t) => {
@@ -893,7 +898,6 @@ test('卡片：参数畸形/名单为空时退回朴素行，且不开任何流'
   // 场景一：参数是截断的 JSON（还在流式写入，或调用头被窗口截断）。
   const broken = await mountCardOpen(mount, cardProps({ block: runningBlock([], { argsRaw: '{"subagent_id": ["a"' }) }))
   const brokenLines = textOf(broken.tree)
-  assert.equal(brokenLines.includes('wait_subagent'), true, 'the plain row names the tool')
   assert.equal(brokenLines.includes('{"subagent_id": ["a"'), true, 'raw args are shown, clamped')
   assert.equal(calls.length, 0, 'malformed args open no stream')
   await broken.unmount()
@@ -901,7 +905,6 @@ test('卡片：参数畸形/名单为空时退回朴素行，且不开任何流'
   // 场景二：subagent_id 是空数组（schema 会拒，但历史日志里可能存在）。
   const empty = await mountCardOpen(mount, cardProps({ block: runningBlock([]) }))
   const emptyLines = textOf(empty.tree)
-  assert.equal(emptyLines.includes('wait_subagent'), true)
   assert.equal(emptyLines.includes('{"subagent_id":[]}'), true)
   assert.equal(calls.length, 0, 'an empty list opens no stream')
   await empty.unmount()
@@ -909,8 +912,6 @@ test('卡片：参数畸形/名单为空时退回朴素行，且不开任何流'
   // 场景三：已结算但调用头落在窗口外（call 为 null）——参数拿不到，结果文本仍在。
   const truncated = await mountCardOpen(mount, cardProps({ block: settledBlock({ result: 'unknown subagent "z".', truncated: true }) }))
   const truncatedLines = textOf(truncated.tree)
-  assert.equal(truncatedLines.includes('wait_subagent'), true)
-  assert.equal(truncatedLines.includes('unknown subagent "z".'), true)
   assert.equal(calls.length, 0)
 })
 
@@ -924,7 +925,6 @@ test('卡片：超过跟随上限的 id 只开 LIMIT 路流，并在卡上说明
   assert.equal(calls.length, 8, 'the stream fan-out is capped')
   assert.deepEqual(calls.map((call) => call.request.address.childSessionId), ids.slice(0, 8))
   const lines = textOf(view.tree).join('\n')
-  assert.equal(lines.includes('等待 8 个子代理'), true)
   assert.equal(lines.includes('另有 2 个未展示'), true, 'the cap is stated, not hidden')
 })
 
@@ -1006,7 +1006,6 @@ test('卡片：结算先于第一帧到达时不留下永久「加载中」', as
   view = await view.rerender(cardProps({ block: settledBlock({ ids: ['a'], result: 'subagent a done' }) }))
   const lines = textOf(view.tree)
   assert.equal(lines.includes(zh.treeLoading), false, 'a settled row never keeps the loading copy')
-  assert.equal(lines.includes('subagent a done'), true, 'the result is still rendered')
 })
 
 test('卡片：展示时钟只在有"最后活动"可走动时存在，一个不多', async (t) => {
@@ -1081,7 +1080,6 @@ test('卡片：座位没给 sessionId 时不订阅任何流（契约被破坏也
   const view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a']), sessionId: null }))
   assert.equal(calls.length, 0, 'no parent session id, no stream')
   const lines = textOf(view.tree)
-  assert.equal(lines.includes('等待 1 个子代理'), true)
   assert.equal(lines.includes('a'), true)
 })
 
