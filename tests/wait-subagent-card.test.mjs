@@ -108,7 +108,7 @@ test('工厂：注册包名行并导出 inject/apply/__test 接缝', () => {
   assert.equal(typeof client.apply, 'function')
   assert.deepEqual(client.inject, ['slots', 'locale', 'remote', 'remote.session'])
   assert.deepEqual(Object.keys(client.__test).sort(), [
-    'DispatchToolBody', 'DispatchToolCard', 'PROMPT_LIMIT', 'WaitSubagentBody', 'WaitSubagentCard',
+    'DispatchToolBody', 'DispatchToolCard', 'PROMPT_PREVIEW_LINES', 'WaitSubagentBody', 'WaitSubagentCard',
     'childIdFromText', 'dispatchArgs', 'dispatchSummary', 'dispatchToolNames', 'en', 'foldEvents',
     'followRequest', 'formatAge', 'subscriptionDiff', 'targetKey', 'targetRecords', 'waitedIds', 'zh',
   ])
@@ -162,8 +162,8 @@ test('locale：座位与词典同 ns，zh/en 键集一致且覆盖全部词条',
 
   // 硬编码键表：新增文案漏了英文（缺 key 会直接显示原始 key）这里变红。
   assert.deepEqual(Object.keys(zh).sort(), [
-    'description', 'dispatchBackground', 'dispatchDefaultModel', 'dispatchForeground', 'dispatchOmitted',
-    'dispatchPrompt', 'guardHint', 'guardLabel', 'loadFailed', 'loading', 'retry', 'save', 'saveFailed',
+    'description', 'dispatchBackground', 'dispatchCollapse', 'dispatchDefaultModel', 'dispatchForeground',
+    'dispatchPrompt', 'dispatchShowAll', 'guardHint', 'guardLabel', 'loadFailed', 'loading', 'retry', 'save', 'saveFailed',
     'saved', 'saving', 'tab', 'title',
     'treeAgeHours', 'treeAgeMinutes', 'treeAgeSeconds', 'treeInactive', 'treeLastActive',
     'treeLastTool', 'treeLiveUnavailable', 'treeLoading', 'treeReadFailed', 'treeRunning',
@@ -176,7 +176,7 @@ test('locale：座位与词典同 ns，zh/en 键集一致且覆盖全部词条',
   }
 
   // 插值词条必须保留 {n} 占位符，否则档位数字/条数无处可填。
-  for (const key of ['treeAgeSeconds', 'treeAgeMinutes', 'treeAgeHours', 'waitTitleRunning', 'waitMore', 'dispatchOmitted']) {
+  for (const key of ['treeAgeSeconds', 'treeAgeMinutes', 'treeAgeHours', 'waitTitleRunning', 'waitMore']) {
     assert.equal(zh[key].includes('{n}'), true, `zh.${key}`)
     assert.equal(en[key].includes('{n}'), true, `en.${key}`)
   }
@@ -1326,7 +1326,7 @@ test('派发卡：没有通用行导出时降级——摘要、三块与结果�
   assert.equal(lines.includes('子代理的收尾输出'), true, 'the fallback shows the result itself (no harness OUTPUT section)')
 })
 
-test('派发展开体：描述/元信息/提示词逐块渲染，提示词保留换行，超长截断并标注省略', async (t) => {
+test('派发展开体：描述/元信息/提示词逐块渲染，提示词保留换行，超长默认折叠成预览', async (t) => {
   const { mount } = useReactRuntime(t)
   applyWith({ 'remote.session': {} })
 
@@ -1346,7 +1346,7 @@ test('派发展开体：描述/元信息/提示词逐块渲染，提示词保留
   const promptNode = findElement(full.tree, (node) => node.props?.children === prompt)
   assert.notEqual(promptNode, undefined, 'the prompt renders as body text')
   assert.equal(promptNode.props.style.whiteSpace, 'pre-wrap', 'the prompt is typeset as body text')
-  assert.equal(lines.includes(zh.dispatchOmitted.replace('{n}', '4')), false, 'nothing is claimed omitted below the limit')
+  assert.equal(lines.includes(zh.dispatchShowAll), true, 'the prompt carries its fold toggle')
 
   // 缺 model 与 run_in_background：默认模型 + 后台派发（与插件默认一致）。
   const minimal = await mountDispatchOpen(mount, cardProps({
@@ -1357,30 +1357,37 @@ test('派发展开体：描述/元信息/提示词逐块渲染，提示词保留
   assert.equal(minimalLines.includes(`${zh.dispatchDefaultModel} · ${zh.dispatchBackground}`), true, 'absent model and absent run_in_background fall back to the plugin defaults')
   assert.equal(minimalLines.includes(`${zh.dispatchDefaultModel} · ${zh.dispatchForeground}`), false)
 
-  // 超长提示词：截断到 PROMPT_LIMIT，末尾如实报出省略了多少字符。
-  const promptLimit = client.__test.PROMPT_LIMIT
-  assert.equal(Number.isInteger(promptLimit) && promptLimit > 0, true, 'PROMPT_LIMIT is a positive integer')
-  const long = 'y'.repeat(promptLimit) + 'TAIL'
-  const truncated = await mountDispatchOpen(mount, cardProps({
+  // 超长提示词：默认收成 PROMPT_PREVIEW_LINES 行预览（不再截断丢内容），
+  // 点「展开全部」看全文，可再收起。
+  const previewLines = client.__test.PROMPT_PREVIEW_LINES
+  assert.equal(Number.isInteger(previewLines) && previewLines > 0, true, 'the preview budget is a positive integer')
+  const long = Array.from({ length: previewLines + 30 }, (_, i) => `line ${i}`).join('\n')
+  const folded = await mountDispatchOpen(mount, cardProps({
     toolName: 'subagent',
     block: settledDispatchBlock({ args: { description: '长提示词', prompt: long }, result: 'done' }),
   }))
-  const truncatedLines = textOf(truncated.tree)
-  assert.equal(truncatedLines.includes('y'.repeat(promptLimit)), true, 'the kept prefix is rendered')
-  assert.equal(truncatedLines.some((line) => line.endsWith('TAIL')), false, 'the tail is dropped')
-  assert.equal(truncatedLines.includes(zh.dispatchOmitted.replace('{n}', '4')), true, 'the omission is stated, not hidden')
+  const foldedLines = textOf(folded.tree)
+  assert.equal(foldedLines.includes(long), true, 'the whole prompt is in the tree (css clamps it, nothing is dropped)')
+  const previewNode = findElement(folded.tree, (node) => node.props?.children === long)
+  assert.equal(previewNode.props.style.maxHeight, `${previewLines * 1.5}em`, 'collapsed: clamped to the preview lines')
+  assert.equal(previewNode.props.style.overflow, 'hidden', 'collapsed: the excess is clipped, not scrolled')
+  assert.equal(foldedLines.includes(zh.dispatchShowAll), true, 'collapsed: the toggle offers the full text')
 
-  // 代理对正好压在截断点上：宁可少一个字，也不要吐出半个字形（切在 UTF-16 单元
-  // 边界上会把 emoji 劈成两半），省略计数把这两半都算进去。
-  const pair = `${'z'.repeat(promptLimit - 1)}😀TAIL`
-  const cut = await mountDispatchOpen(mount, cardProps({
-    toolName: 'subagent',
-    block: settledDispatchBlock({ args: { description: '代理对', prompt: pair }, result: 'done' }),
-  }))
-  const cutLines = textOf(cut.tree)
-  assert.equal(cutLines.includes('z'.repeat(promptLimit - 1)), true, 'the cut backs off the whole surrogate pair')
-  assert.equal(cutLines.some((line) => /[\uD800-\uDBFF]$/.test(line)), false, 'no lone high surrogate is rendered')
-  assert.equal(cutLines.includes(zh.dispatchOmitted.replace('{n}', '6')), true, 'both halves of the pair count as omitted')
+  const head = findElement(folded.tree, (node) => node.type === 'button' && node.props['aria-expanded'] !== undefined)
+  assert.notEqual(head, undefined, 'the prompt renders its fold toggle as a button')
+  assert.equal(head.props['aria-expanded'], false, 'the prompt starts folded')
+  head.props.onClick()
+  await folded.flush()
+  const expandedNode = findElement(folded.tree, (node) => node.props?.children === long)
+  assert.equal(expandedNode.props.style.maxHeight, undefined, 'expanded: no clamp, the whole prompt shows')
+  assert.equal(expandedNode.props.style.whiteSpace, 'pre-wrap', 'expanded: still typeset as body text')
+  assert.equal(textOf(folded.tree).includes(zh.dispatchCollapse), true, 'expanded: the toggle offers the collapse')
+
+  const again = findElement(folded.tree, (node) => node.type === 'button' && node.props['aria-expanded'] === true)
+  assert.notEqual(again, undefined, 'the toggle reports the expanded state')
+  again.props.onClick()
+  await folded.flush()
+  assert.equal(findElement(folded.tree, (node) => node.props?.children === long).props.style.maxHeight, `${previewLines * 1.5}em`, 'collapsing restores the preview')
 })
 
 test('派发卡：结算文本里的子会话 id + 目录说仍在运行 → 开流，推帧落到那一行', async (t) => {

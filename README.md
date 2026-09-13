@@ -138,7 +138,8 @@ rm -rf ~/.dsh/.agent-presets/eng
 同一个座位还按 wire 工具名接管**派发工具**：`subagent`（`dsh-subagent-dispatch` 的通用派发工具）与它在 `roles` 配置里注册的每个角色工具（本机 profile patch 的 `researcher` / `scout` / `tdd-tester` / `implementer` / `reviewer` / `code-quality-reviewer` / `lark`）。名单写在 `src/client.js` 的 `DISPATCH_TOOL_NAMES`：**改插件配置里的角色，这里要跟着加**（名字对不上只是退回通用行，不会报错）。
 
 - **折叠摘要**是 `工具名 · 模型 · 描述`；`model` 缺席时整段省掉（不留空分隔符），`description` 缺席时用压平截断后的提示词顶上，两项都拿不到（参数还在流式写入、调用头被窗口截断、JSON 畸形）时交给通用行显示原始参数 JSON。
-- **展开体不是参数 JSON**，而是四块：描述（无则省）、元信息行（`模型 ?? 默认模型` · `后台派发`/`前台等待`）、提示词正文（保留换行，超过 4000 字符截断并在末尾报出省略多少），以及这次派发出来的**子代理那一行实时信息**。
+- **展开体不是参数 JSON**，而是四块：描述（无则省）、元信息行（`模型 ?? 默认模型` · `后台派发`/`前台等待`）、提示词正文，以及这次派发出来的**子代理那一行实时信息**。
+- **提示词只折叠、不截断**：正文保留换行，默认收在 20 行（`PROMPT_PREVIEW_LINES` × 正文 1.5 行高 = `max-height: 30em`，超出部分裁掉），行首的「展开全部 / 收起」切换全文；收纳时整段文本仍在 DOM 里并挂在 `title` 上，悬停可读全文。不用 `-webkit-line-clamp`：React 只认识无单位白名单里的 `lineClamp`，`WebkitLineClamp: <number>` 会被补成非法的 `20px`，夹断静默失效（已在浏览器里验证过 `30em` 版本真实裁到 20 行）。
 - 子代理 id 从**已结算的返回文本**里解析（`started subagent <id>`，UUID 或 `session-…`；后台 one-shot 回的是 job id，取不到）：取不到就只显示前三块。id 还要在会话目录（`subagentsByParent`）里认领得到才成行——正则只是形状匹配，前台派发的返回文本是子代理自己的输出，里面可能正好有一个 UUID。
 - 实时行与 `wait_subagent` 是**同一套**（同一个 `subagentRowElement` 与 `useFollowFeeds`：标签/状态/最后活动/最后工具/最后一行 + `remote.session.follow` 推送流）：**只有卡在展开体里挂载、目录说这个子代理仍在运行时才订阅**；目录说已结束时那一行留在原地（状态列写"已结束"），已折叠出的信息一并保留，但不再订阅、不回放日志。父会话 id 用座位的 `sessionId`，follow 地址的 mode 优先取目录快照、取不到按 `continuable`。
 

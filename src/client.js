@@ -61,7 +61,8 @@ window.__ModuleLoader__.load({
 			dispatchBackground: '后台派发',
 			dispatchForeground: '前台等待',
 			dispatchPrompt: '提示词',
-			dispatchOmitted: '…已省略 {n} 字符',
+			dispatchShowAll: '展开全部',
+			dispatchCollapse: '收起',
 			treeLoading: '加载中…',
 			treeReadFailed: '读取失败',
 			treeLiveUnavailable: '实时不可用',
@@ -95,7 +96,8 @@ window.__ModuleLoader__.load({
 			dispatchBackground: 'background dispatch',
 			dispatchForeground: 'foreground wait',
 			dispatchPrompt: 'Prompt',
-			dispatchOmitted: '…{n} characters omitted',
+			dispatchShowAll: 'Show all',
+			dispatchCollapse: 'Collapse',
 			treeLoading: 'Loading…',
 			treeReadFailed: 'Read failed',
 			treeLiveUnavailable: 'Live updates unavailable',
@@ -170,10 +172,11 @@ window.__ModuleLoader__.load({
 		];
 
 		/**
-		 * 展开体里提示词的展示上限（字符）。派发提示词动辄数千字，整段灌进 DOM 只为
-		 * 了让人看到开头——超过这个长度截断，并在末尾如实报出省略了多少。
+		 * 收纳态提示词预览保留的行数：超过就夹断，点「展开全部」看全文。派发提示词
+		 * 动辄数千字，整段铺开会把下面的实时行推出视野；截断又会让人看不到内容，所以
+		 * 只折叠、不丢字。
 		 */
-		const PROMPT_LIMIT = 4000;
+		const PROMPT_PREVIEW_LINES = 20;
 
 		/** "最后一行"展示上限（字符）。 */
 		const LAST_LINE_LIMIT = 120;
@@ -218,6 +221,12 @@ window.__ModuleLoader__.load({
 			dispatchDescription: { color: 'var(--dsw-alias-label-secondary, #aaa)' },
 			dispatchMeta: { color: 'var(--dsw-alias-label-tertiary, #8a94ab)' },
 			dispatchPrompt: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--dsw-alias-label-secondary, #aaa)' },
+			// 收纳态：PROMPT_PREVIEW_LINES 行 × 正文 1.5 行高 = 30em 处夹断。用 em 而不是
+			// `-webkit-line-clamp`：React 只认识无单位属性白名单里的 `lineClamp`，写成
+			// `WebkitLineClamp: <number>` 会被补成非法的 `20px`，夹断静默失效。
+			dispatchPromptPreview: { maxHeight: `${PROMPT_PREVIEW_LINES * 1.5}em`, overflow: 'hidden', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--dsw-alias-label-secondary, #aaa)' },
+			dispatchPromptHead: { display: 'flex', alignItems: 'center', gap: '8px' },
+			dispatchPromptToggle: { font: 'inherit', cursor: 'pointer', border: 'none', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, #8a94ab)', padding: 0, textDecoration: 'underline' },
 			dispatchLabel: { color: 'var(--dsw-alias-label-tertiary, #8a94ab)' },
 		};
 
@@ -600,18 +609,6 @@ window.__ModuleLoader__.load({
 		function argsRawOf(block) {
 			if (block === null || typeof block !== 'object') return undefined;
 			return block.kind === 'tool-result' ? block.call?.argsRaw : block.argsRaw;
-		}
-
-		/**
-		 * 截到 limit 个 UTF-16 单元，但不在代理对中间切开：半个字形比少一个字符更难读。
-		 * @param value - 原文本。
-		 * @param limit - 上限（UTF-16 单元数）。
-		 * @returns 不超过 limit 的文本（未超长时原样返回）。
-		 */
-		function cutText(value, limit) {
-			const cut = value.slice(0, limit);
-			const last = cut.charCodeAt(cut.length - 1);
-			return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
 		}
 
 		/**
@@ -1073,8 +1070,10 @@ window.__ModuleLoader__.load({
 				? [{ parentSessionId: sessionId, childSessionId: childId, mode: entryMode(entry) }]
 				: [];
 			const { feeds, now, followAvailable } = useFollowFeeds(targets);
-			const prompt = args.prompt === undefined ? undefined : cutText(args.prompt, PROMPT_LIMIT);
-			const omitted = args.prompt === undefined ? 0 : args.prompt.length - prompt.length;
+			// 提示词不截断：默认收成 PROMPT_PREVIEW_LINES 行预览，点「展开全部」看全文，
+			// 可再收起——截断会让人看不到内容，折叠不会。
+			const prompt = args.prompt;
+			const [promptOpen, setPromptOpen] = useState(false);
 
 			const children = [];
 			// standalone 降级（没有通用行外壳）时补一行摘要，替代工具行的折叠摘要。
@@ -1090,9 +1089,19 @@ window.__ModuleLoader__.load({
 			children.push(h('div', { key: 'meta', style: styles.dispatchMeta },
 				`${args.model ?? text('dispatchDefaultModel')} · ${text(args.background ? 'dispatchBackground' : 'dispatchForeground')}`));
 			if (prompt !== undefined) {
-				children.push(h('div', { key: 'promptLabel', style: styles.dispatchLabel }, text('dispatchPrompt')));
-				children.push(h('div', { key: 'prompt', style: styles.dispatchPrompt }, prompt));
-				if (omitted > 0) children.push(h('div', { key: 'omitted', style: styles.dispatchLabel }, text('dispatchOmitted', { n: omitted })));
+				children.push(h('div', { key: 'promptHead', style: styles.dispatchPromptHead },
+					h('span', { style: styles.dispatchLabel }, text('dispatchPrompt')),
+					h('button', {
+						type: 'button',
+						style: styles.dispatchPromptToggle,
+						onClick: () => setPromptOpen((value) => !value),
+						'aria-expanded': promptOpen,
+					}, text(promptOpen ? 'dispatchCollapse' : 'dispatchShowAll'))));
+				children.push(h('div', {
+					key: 'prompt',
+					style: promptOpen ? styles.dispatchPrompt : styles.dispatchPromptPreview,
+					title: promptOpen ? undefined : prompt,
+				}, prompt));
 			}
 			if (entry !== undefined) {
 				children.push(subagentRowElement({
@@ -1186,7 +1195,7 @@ window.__ModuleLoader__.load({
 			foldEvents, formatAge, followRequest, subscriptionDiff, targetKey, targetRecords,
 			waitedIds, WaitSubagentCard, WaitSubagentBody,
 			childIdFromText, dispatchArgs, dispatchSummary, dispatchToolNames: DISPATCH_TOOL_NAMES,
-			DispatchToolCard, DispatchToolBody, PROMPT_LIMIT,
+			DispatchToolCard, DispatchToolBody, PROMPT_PREVIEW_LINES,
 			zh, en,
 		};
 		return module.exports;
