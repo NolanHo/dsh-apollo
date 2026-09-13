@@ -185,6 +185,9 @@ window.__ModuleLoader__.load({
 		/** 共享空目录：选择器返回 undefined 时保持同一引用，避免无谓重渲染。 */
 		const NO_CATALOG = Object.freeze({});
 
+		/** 展开体正文的字体栈：与通用行的 ioText 同族（等宽）。 */
+		const MONO_FONT = '"SF Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
+
 		const styles = {
 			wrap: { display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '760px', color: 'var(--dsw-alias-label-primary, inherit)' },
 			hint: { margin: 0, color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '13px', lineHeight: '20px' },
@@ -195,14 +198,17 @@ window.__ModuleLoader__.load({
 			ok: { color: 'var(--dsw-alias-state-success-primary, #3c3)', fontSize: '13px' },
 			error: { color: 'var(--dsw-alias-state-error-primary, #c33)', fontSize: '13px' },
 			// 展开体容器：展开后由通用行的 bodyWrap 承载，这里只负责行间距。
-			body: { display: 'flex', flexDirection: 'column', gap: '6px' },
+			// 展开体一律沿用通用行正文（ioText）的规格：等宽栈、11px、次级/三级色。
+			// 自造字号或字体族会让这块文字"长不到"卡片里（实测过 16px 无衬线 vs
+			// 11px 等宽的混排）。
+			body: { display: 'flex', flexDirection: 'column', gap: '6px', fontFamily: MONO_FONT, fontSize: '11px', lineHeight: 1.5 },
 			// standalone 降级时的一行摘要（正常路径下摘要由通用行的折叠行提供）。
 			standaloneHead: { fontWeight: 600 },
 			// 与通用工具的正文同款排版：13px 继承、次级色；细节行再降一档、缩进对齐。
 			waitLine: { display: 'flex', flexDirection: 'column', gap: '2px' },
-			waitLineHead: { color: 'var(--dsw-alias-label-secondary, #aaa)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-			waitLineDetail: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingLeft: '12px' },
-			fallbackArgs: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px', color: 'var(--dsw-alias-label-secondary, #aaa)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+			waitLineHead: { color: 'var(--dsw-alias-label-secondary, #b9c6e0)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+			waitLineDetail: { color: 'var(--dsw-alias-label-tertiary, #8a94ab)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingLeft: '12px' },
+			fallbackArgs: { fontFamily: MONO_FONT, color: 'var(--dsw-alias-label-secondary, #aaa)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
 			resultBox: { display: 'flex', flexDirection: 'column', gap: '2px', paddingTop: '6px', borderTop: '1px solid var(--dsw-alias-border-l2, #555)' },
 			resultLabel: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px' },
 			resultText: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--dsw-alias-label-secondary, #aaa)' },
@@ -210,9 +216,9 @@ window.__ModuleLoader__.load({
 			// 派发展开体的三块静态内容：描述、模型/前后台、提示词正文。与通用工具的
 			// 正文同款排版（纯文本行，次级色；提示词保留换行）。
 			dispatchDescription: { color: 'var(--dsw-alias-label-secondary, #aaa)' },
-			dispatchMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px' },
+			dispatchMeta: { color: 'var(--dsw-alias-label-tertiary, #8a94ab)' },
 			dispatchPrompt: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--dsw-alias-label-secondary, #aaa)' },
-			dispatchLabel: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px' },
+			dispatchLabel: { color: 'var(--dsw-alias-label-tertiary, #8a94ab)' },
 		};
 
 		/** 记一条诊断：外部插件的异常只能进 console，不能进渲染。 */
