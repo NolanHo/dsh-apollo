@@ -1,5 +1,5 @@
 /**
- * dsh-apollo — 工程模式设置面板 + 实时代理树（浏览器半边）。
+ * dsh-apollo — 工程模式设置面板 + `wait_subagent` 工具卡（浏览器半边）。
  *
  * 本文件即最终产物（closure-factory 格式，与 dsh-web 生态 tsdown client 预设
  * 的输出同构）：执行时向 window.__ModuleLoader__ 注册工厂，externals（react）
@@ -8,10 +8,10 @@
  * 1. 官方 Plugins 设置分区的 `settings.plugins.tab` ——「工程模式」标签页
  *    （dsh-plugin-manager 同款注入方式）：退出守卫开关，经 host 半边的
  *    /eng-panel/api/config 读写；
- * 2. 会话标题栏的 `conversation.session.header.actions` ——「子代理树」按钮，
- *    展开右下角浮动面板。目录来自 `sessions` 服务的 subagentsByParent 快照，
- *    每个运行中节点的最后一行输出/最后一个工具来自 `remote.session.follow`
- *    的推送流（不是轮询）。
+ * 2. `tool.call.toolview` 的 `wait_subagent` 键 —— 接管该工具的工具卡：卡里不是
+ *    原始 JSON，而是 `subagent_id` 里每个 id 的实时信息（标签/状态/最后活动/
+ *    最后一个工具/最后一行助手文本），内容来自 `remote.session.follow` 的推送流
+ *    （不是轮询）；工具结算后显示工具返回文本并冻结已折叠出的信息。
  *
  * 注册 id 必须等于包名：client-modules 按包名建图行，校验脚本注册的 id
  * 与图行一致，否则启动即报 "loaded without registering"。
@@ -44,13 +44,11 @@ window.__ModuleLoader__.load({
 			loadFailed: '读取配置失败',
 			retry: '重试',
 			saveFailed: '保存失败：',
-			treeButton: '🌳 子代理',
-			treeTitle: '子代理树',
-			treeClose: '关闭',
-			treeEmpty: '暂无子代理',
+			waitTitleRunning: '等待 {n} 个子代理',
+			waitTitleSettled: '等待结束',
+			waitMore: '另有 {n} 个未展示',
+			waitResult: '结果',
 			treeLoading: '加载中…',
-			treeLoadFailed: '子代理目录读取失败',
-			treeCatalogUnavailable: '目录不可用',
 			treeReadFailed: '读取失败',
 			treeLiveUnavailable: '实时不可用',
 			treeRunning: '运行中',
@@ -60,8 +58,6 @@ window.__ModuleLoader__.load({
 			treeAgeMinutes: '{n} 分钟前',
 			treeAgeHours: '{n} 小时前',
 			treeLastTool: '最后工具',
-			treeExpand: '展开',
-			treeCollapse: '收起',
 		};
 
 		const en = {
@@ -77,13 +73,11 @@ window.__ModuleLoader__.load({
 			loadFailed: 'Failed to load configuration',
 			retry: 'Retry',
 			saveFailed: 'Save failed: ',
-			treeButton: '🌳 Subagents',
-			treeTitle: 'Subagent tree',
-			treeClose: 'Close',
-			treeEmpty: 'No subagents',
+			waitTitleRunning: 'Waiting for {n} subagent(s)',
+			waitTitleSettled: 'Wait finished',
+			waitMore: '{n} more not shown',
+			waitResult: 'Result',
 			treeLoading: 'Loading…',
-			treeLoadFailed: 'Failed to load the subagent catalog',
-			treeCatalogUnavailable: 'Catalog unavailable',
 			treeReadFailed: 'Read failed',
 			treeLiveUnavailable: 'Live updates unavailable',
 			treeRunning: 'running',
@@ -93,8 +87,6 @@ window.__ModuleLoader__.load({
 			treeAgeMinutes: '{n}m ago',
 			treeAgeHours: '{n}h ago',
 			treeLastTool: 'Last tool',
-			treeExpand: 'Expand',
-			treeCollapse: 'Collapse',
 		};
 
 		/** 词条插值：{n} 由 params 填充，缺席的占位符原样保留。 */
@@ -113,14 +105,22 @@ window.__ModuleLoader__.load({
 		 * 折叠窗口：`maxMessages` 的切点锚在倒数第 N 条 `user/message`（上游
 		 * `nthMessageCut` 的语义），不是"N 条事件"。子代理会话通常只有 1–4 条
 		 * user 消息，所以这 4 条的下场是**整段日志**的开场快照（实测单个子代理
-		 * ~38 万字节）；正因为一次重开等于重付整段日志，流必须按节点增量管理
-		 * （见 SubagentTreePanel 的流 effect），不能因任一节点翻转就全量重开。
+		 * ~38 万字节）；正因为一次重开等于重付整段日志，流必须按目标增量管理
+		 * （见 WaitSubagentCard 的流 effect），不能因任一 id 的状态变化就全量重开。
 		 */
 		const FOLLOW_MAX_MESSAGES = 4;
 
 		/**
+		 * 一张卡最多跟随的子代理数。每个 id 一路 `remote.session.follow` 流，而
+		 * 每路流的开场快照按 FOLLOW_MAX_MESSAGES 回放该子代理的整段日志，所以
+		 * 畸形或超长的 `subagent_id` 必须在开流之前就被挡住；被挡掉的条数在卡上
+		 * 明说（waitMore），不假装名单只有这么长。
+		 */
+		const WAITED_IDS_LIMIT = 8;
+
+		/**
 		 * 一路 follow 的请求体：`SessionAddress` 是判别联合，子代理地址必须带
-		 * `kind: 'subagent'`；`assistantStream` 在类型上是字面量 `true`，本面板
+		 * `kind: 'subagent'`；`assistantStream` 在类型上是字面量 `true`，本卡
 		 * 不要 token 级增量，所以整字段省略（省略等价于未订阅；写 `false` 既不
 		 * 满足类型、真实链路上也已被验证会让网关按参数拒收这一路请求）。提成
 		 * 纯函数是为了让单测钉住这个线上契约。
@@ -150,25 +150,22 @@ window.__ModuleLoader__.load({
 			button: { font: 'inherit', cursor: 'pointer', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: '6px', background: 'var(--dsw-alias-bg-layer-1, transparent)', color: 'inherit', padding: '4px 12px' },
 			ok: { color: 'var(--dsw-alias-state-success-primary, #3c3)', fontSize: '13px' },
 			error: { color: 'var(--dsw-alias-state-error-primary, #c33)', fontSize: '13px' },
-			seat: { display: 'inline-flex', alignItems: 'center' },
-			headerButton: { font: 'inherit', fontSize: '13px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '6px', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: '6px', background: 'var(--dsw-alias-bg-layer-1, transparent)', color: 'var(--dsw-alias-label-primary, inherit)', padding: '2px 8px' },
-			badge: { display: 'inline-block', minWidth: '16px', padding: '0 4px', borderRadius: '8px', background: 'var(--dsw-alias-state-success-primary, #3c3)', color: '#fff', fontSize: '11px', lineHeight: '16px', textAlign: 'center' },
-			treePanel: { position: 'fixed', right: '16px', bottom: '16px', width: '380px', maxHeight: '45vh', display: 'flex', flexDirection: 'column', zIndex: 40, border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: '8px', background: 'var(--dsw-alias-bg-layer-2, #1b1b1b)', color: 'var(--dsw-alias-label-primary, inherit)', boxShadow: '0 6px 24px rgba(0, 0, 0, 0.35)', fontSize: '13px' },
-			treePanelHead: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', padding: '8px 10px', borderBottom: '1px solid var(--dsw-alias-border-l2, #555)' },
-			treePanelTitle: { fontWeight: 600 },
-			treeClose: { font: 'inherit', cursor: 'pointer', border: 'none', background: 'transparent', color: 'inherit', padding: '0 4px', fontSize: '16px', lineHeight: '16px' },
-			treePanelBody: { overflow: 'auto', padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: '6px' },
-			treeEmpty: { margin: 0, color: 'var(--dsw-alias-label-tertiary, #888)' },
-			treeError: { margin: 0, color: 'var(--dsw-alias-state-error-primary, #c33)' },
-			treeRow: { display: 'flex', flexDirection: 'column', gap: '2px' },
-			treeRowHead: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 },
-			treeToggle: { font: 'inherit', cursor: 'pointer', border: 'none', background: 'transparent', color: 'inherit', padding: 0, width: '14px' },
-			treeToggleSpacer: { display: 'inline-block', width: '14px' },
-			treeLabel: { font: 'inherit', cursor: 'pointer', border: 'none', background: 'transparent', color: 'inherit', padding: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '170px', textAlign: 'left' },
-			treeMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px', whiteSpace: 'nowrap' },
+			card: { display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '13px', color: 'var(--dsw-alias-label-primary, inherit)' },
+			cardHead: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
+			cardTitle: { fontWeight: 600 },
+			cardMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px' },
+			waitRow: { display: 'flex', flexDirection: 'column', gap: '2px' },
+			waitRowHead: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 },
+			waitLabel: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '260px' },
+			waitMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px', whiteSpace: 'nowrap' },
 			dotRunning: { color: 'var(--dsw-alias-state-success-primary, #3c3)', fontSize: '10px' },
 			dotIdle: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '10px' },
-			treeDetail: { color: 'var(--dsw-alias-label-secondary, #aaa)', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingLeft: '20px' },
+			waitDetail: { color: 'var(--dsw-alias-label-secondary, #aaa)', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingLeft: '18px' },
+			fallbackArgs: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px', color: 'var(--dsw-alias-label-secondary, #aaa)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+			resultBox: { display: 'flex', flexDirection: 'column', gap: '2px', paddingTop: '6px', borderTop: '1px solid var(--dsw-alias-border-l2, #555)' },
+			resultLabel: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px' },
+			resultText: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--dsw-alias-label-secondary, #aaa)' },
+			resultFailed: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--dsw-alias-state-error-primary, #c33)' },
 		};
 
 		/** 记一条诊断：外部插件的异常只能进 console，不能进渲染。 */
@@ -217,12 +214,12 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * 折叠单条事件；不是本面板渲染的两类事件、或 data 形状不符时原样返回。
+		 * 折叠单条事件；不是本卡渲染的两类事件、或 data 形状不符时原样返回。
 		 *
 		 * `user/message` 是**回合边界**：新的用户输入意味着上一轮的助手文本与
 		 * 工具名已经过期，必须清空（只推进 lastTime）。少了这个重置，带 fork
 		 * 种子前缀的子代理在自己还没产出时会把父会话的最后一行/最后一个工具
-		 * 显示成自己的——面板在撒谎；continuable 子代理被再次唤醒时同样会继续
+		 * 显示成自己的——卡在撒谎；continuable 子代理被再次唤醒时同样会继续
 		 * 显示上一轮的旧回复。
 		 *
 		 * @param state - 当前 { lastText, lastTool, lastTime }。
@@ -318,11 +315,12 @@ window.__ModuleLoader__.load({
 
 		/**
 		 * 增量订阅差分：按 key 比较"当前活着的流"与"当前该有的目标"，只给出要
-		 * 新开的目标和要停掉的 key。任一节点 activity 翻转时，其余节点的 key
-		 * 不变，因而**不被触碰**——一次重开等于重付该子代理的整段日志开场快照
-		 * （见 FOLLOW_MAX_MESSAGES），全量重开在扇出下是 O(N×M)。
+		 * 新开的目标和要停掉的 key。目标清单不变时（子代理 activity 翻转、目录
+		 * 推送重渲染）每个 key 都不变，因而**不被触碰**——一次重开等于重付该
+		 * 子代理的整段日志开场快照（见 FOLLOW_MAX_MESSAGES），全量重开在扇出下
+		 * 是 O(N×M)。
 		 * @param activeKeys - 正在消费的 key（Set、数组或 `Map.prototype.keys()` 迭代器）。
-		 * @param desired - 当前渲染中且 running 的目标数组。
+		 * @param desired - 当前该有流的全部目标（等待中的工具调用覆盖名单上每个 id）。
 		 * @returns {{ stop: string[], start: Array<{ key, target }> }} 均为稳定顺序。
 		 */
 		function subscriptionDiff(activeKeys, desired) {
@@ -375,55 +373,97 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * 把客户端目录摊平成面板渲染的深度优先行。
+		 * 本会话那一层目录的条目索引（子会话 id → entry）。
 		 *
-		 * 目录按父会话一层的粒度缓存：某个子节点的下一层，只有它自己出现在
-		 * expanded 里才会渲染。`diagnostic` 条目描述的是不可用的候选（没有可
-		 * 打开/可订阅的地址），因此不是这里的行。目录来自外部 store，任何形状
-		 * 都要容错；visited 同时挡住损坏目录里的自环/祖先环导致的无尽递归。
+		 * 卡只需要三件事：标签、活动态、follow 地址的 mode。`diagnostic` 条目
+		 * 不是可等待的子代理，不进索引。目录来自外部 store，任何形状都容错。
 		 *
 		 * @param catalog - sessions 快照的 subagentsByParent 记录。
-		 * @param rootSessionId - 根会话 id（第一层的父）。
-		 * @param expanded - 已展开的节点 id 集合（Set 或数组）。
-		 * @returns 行数组 { id, parentSessionId, mode, label, activity, hasChildren, depth }。
+		 * @param sessionId - 卡所在会话 id（即等待的父会话）。
+		 * @returns Map<子会话 id, 目录条目>。
 		 */
-		function treeRows(catalog, rootSessionId, expanded) {
-			const rows = [];
-			if (catalog === null || typeof catalog !== 'object') return rows;
-			const open = idSet(expanded);
-			const visited = new Set();
-			const walk = (parentId, depth) => {
-				if (visited.has(parentId)) return;
-				visited.add(parentId);
-				const level = catalog[parentId];
-				if (level === null || typeof level !== 'object' || !Array.isArray(level.entries)) return;
-				for (const entry of level.entries) {
-					if (entry === null || typeof entry !== 'object' || entry.kind !== 'child') continue;
-					if (typeof entry.id !== 'string' || entry.id === '') continue;
-					rows.push({
-						id: entry.id,
-						parentSessionId: parentId,
-						mode: entry.mode === 'continuable' ? 'continuable' : 'one-shot',
-						label: typeof entry.label === 'string' && entry.label !== '' ? entry.label : undefined,
-						activity: entry.activity === 'running' ? 'running' : 'inactive',
-						hasChildren: entry.hasChildren === true,
-						depth,
-					});
-					if (open.has(entry.id)) walk(entry.id, depth + 1);
-				}
-			};
-			walk(rootSessionId, 0);
-			return rows;
+		function childEntries(catalog, sessionId) {
+			const entries = new Map();
+			if (catalog === null || typeof catalog !== 'object' || typeof sessionId !== 'string') return entries;
+			const level = catalog[sessionId];
+			if (level === null || typeof level !== 'object' || !Array.isArray(level.entries)) return entries;
+			for (const entry of level.entries) {
+				if (entry === null || typeof entry !== 'object' || entry.kind !== 'child') continue;
+				if (typeof entry.id !== 'string' || entry.id === '') continue;
+				entries.set(entry.id, entry);
+			}
+			return entries;
 		}
 
-		/** 已加载层级里的运行中节点数（徽标）；更深的层没拉过就数不到。 */
-		function countRunning(catalog, rootSessionId) {
-			if (catalog === null || typeof catalog !== 'object') return 0;
-			let count = 0;
-			for (const row of treeRows(catalog, rootSessionId, Object.keys(catalog))) {
-				if (row.activity === 'running') count += 1;
+		/** 目录条目的活动态；条目缺席或取值不符给 undefined（不替 store 猜状态）。 */
+		function entryActivity(entry) {
+			if (entry === null || typeof entry !== 'object') return undefined;
+			return entry.activity === 'running' ? 'running' : entry.activity === 'inactive' ? 'inactive' : undefined;
+		}
+
+		/**
+		 * follow 地址的 mode：目录条目说了算；查不到（快照还没到、窗口外的历史卡、
+		 * 目录不可用）按 `continuable`——`wait_subagent` 只等待 continuable 直系
+		 * 子代理，这是唯一有依据的默认值。
+		 */
+		function entryMode(entry) {
+			return entry !== null && typeof entry === 'object' && entry.mode === 'one-shot' ? 'one-shot' : 'continuable';
+		}
+
+		/**
+		 * `wait_subagent` 的等待名单：解析工具参数里的 `subagent_id`，去重保序，再按
+		 * WAITED_IDS_LIMIT 截断。参数来自 JSON 边界（窗口截断时整段缺席），任何形状
+		 * 都不抛；畸形一律给空名单，由卡退回朴素行。
+		 *
+		 * @param argsRaw - 工具调用的原始参数文本（运行中取 block.argsRaw，已结算取
+		 *   block.call?.argsRaw，窗口截断时为 null/undefined）。
+		 * @returns {{ ids: string[], truncated: number }} ids 为可跟随的名单；
+		 *   truncated 为被上限挡掉的条数（0 表示名单完整）。
+		 */
+		function waitedIds(argsRaw) {
+			if (typeof argsRaw !== 'string' || argsRaw === '') return { ids: [], truncated: 0 };
+			let parsed;
+			try {
+				parsed = JSON.parse(argsRaw);
+			} catch {
+				// 工具参数是流式写入的原始文本：截断/畸形都只能退回朴素行。
+				return { ids: [], truncated: 0 };
 			}
-			return count;
+			if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { ids: [], truncated: 0 };
+			const raw = parsed.subagent_id;
+			if (!Array.isArray(raw)) return { ids: [], truncated: 0 };
+			const unique = [];
+			const seen = new Set();
+			for (const value of raw) {
+				if (typeof value !== 'string' || value === '' || seen.has(value)) continue;
+				seen.add(value);
+				unique.push(value);
+			}
+			return { ids: unique.slice(0, WAITED_IDS_LIMIT), truncated: Math.max(0, unique.length - WAITED_IDS_LIMIT) };
+		}
+
+		/**
+		 * 已结算卡的结果文本：`content` 里的 text 块按顺序换行拼接；一个 text 块
+		 * 都没有时退回错误码，让失败的调用也不留空白。
+		 * @param block - ToolResultNode。
+		 * @returns 结果文本，或 undefined 表示这次调用没有可展示的返回内容。
+		 */
+		function resultTextOf(block) {
+			const content = block !== null && typeof block === 'object' ? block.content : undefined;
+			if (Array.isArray(content)) {
+				const parts = [];
+				for (const part of content) {
+					if (part === null || typeof part !== 'object' || part.type !== 'text') continue;
+					if (typeof part.text === 'string' && part.text !== '') parts.push(part.text);
+				}
+				if (parts.length > 0) return parts.join('\n');
+			}
+			const error = block !== null && typeof block === 'object' ? block.error : undefined;
+			if (error !== null && typeof error === 'object') {
+				if (typeof error.code === 'string' && error.code !== '') return error.code;
+				if (typeof error.name === 'string' && error.name !== '') return error.name;
+			}
+			return undefined;
 		}
 
 		function EngAtlasPanelTab() {
@@ -484,92 +524,70 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * 右下角浮动面板：按层级渲染已加载的子代理树，并为每个可见的 running
-		 * 节点开一路 remote.session.follow 推送流。
+		 * `wait_subagent` 的工具卡：把工具参数里的每个 subagent id 渲染成一行实时
+		 * 信息（标签/状态/最后活动/最后一个工具/最后一行助手文本），而不是原始 JSON。
 		 *
-		 * 面板只持有一个每秒的展示时钟（见组件内的 `now`）：它只重渲染已有的
-		 * 时间戳，不取数据；内容与状态一律由推送驱动。
+		 * 只对**运行中**的工具调用开流：等待中意味着这些子代理正在跑，所以名单上
+		 * 每个 id 各开一路 `remote.session.follow` 推送流；工具一旦结算就 diff 掉全部
+		 * 流（结算后才挂载的卡，例如从窗口外滚回来的历史卡，不开任何流），卡上保留
+		 * 结束前已折叠出的最后信息，并显示工具的返回文本。
 		 *
-		 * 流按节点增量管理（`activeStreams` 里的 Map + `subscriptionDiff`）：目录
-		 * 里任一节点 activity 翻转只会 start/stop 那一个目标，其余流原样保留。
+		 * 卡只持有一个每秒的展示时钟（见组件内的 `now`），且只在有行要显示"最后活动"
+		 * 时才走：它只重渲染已有的时间戳，不取数据（内容仍由推送驱动），所以不是轮询。
+		 * 没有它，"最后活动 N 秒前"会冻结在最后一次推送的时刻——一个正在跑但暂时没有
+		 * 新事件的子代理会被误读成"停住了"，恰好是这块卡要回答的问题。
+		 *
+		 * 流按 id 增量管理（`activeStreams` 里的 Map + `subscriptionDiff`）：名单或
+		 * mode 变化只会 start/stop 变化的那几路，其余流原样保留。
 		 */
-		function SubagentTreePanel(props) {
-			const { sessionId, catalog, catalogUnavailable, text, onClose } = props;
-			const [expanded, setExpanded] = useState(() => new Set());
+		function WaitSubagentCard(props) {
+			const text = translator(props?.t);
+			const sessionId = typeof props?.sessionId === 'string' ? props.sessionId : undefined;
+			const block = props?.block;
+			const settled = block !== null && typeof block === 'object' && block.kind === 'tool-result';
+			// 取参路径：运行中是 block.argsRaw，已结算是 block.call?.argsRaw（窗口截断
+			// 让调用头落在窗口外时 call 为 null，两条路径都可能缺席）。
+			const argsRaw = settled ? block.call?.argsRaw : block?.argsRaw;
+			const waited = waitedIds(argsRaw);
+			// 目录只用来补标签/活动态/follow 地址的 mode；选择器抛错或缺席时退回共享
+			// 空目录，卡照常按 id 渲染。
+			const entries = childEntries(catalogFrom(props?.useSessions) ?? NO_CATALOG, sessionId);
 			const [feeds, setFeeds] = useState({});
-			// key → AbortController：当前活着的流。ref 而非 state——abort 句柄不进
-			// 渲染，标签/徽标只需 feeds。
+			// key → AbortController：当前活着的流。ref 而非 state——abort 句柄不进渲染。
 			const activeStreams = useRef(new Map());
-			// 已声明"正在被消费"的层 id（见下面的差分 effect）。
-			const declaredLevels = useRef(new Set());
-			// 展示时钟：每秒只重渲染已有的时间戳，不取任何数据（数据仍由 follow 推送），
-			// 所以它不是轮询。没有它，"最后活动 N 秒前"会冻结在最后一次推送的时刻——
-			// 一个正在跑但暂时没有新事件的子代理会被误读成"停住了"，恰好是这块面板
-			// 要回答的问题。
 			const [now, setNow] = useState(() => Date.now());
+			const waiting = !settled && waited.ids.length > 0 && sessionId !== undefined;
+			const targets = waiting
+				? waited.ids.map((id) => ({ parentSessionId: sessionId, childSessionId: id, mode: entryMode(entries.get(id)) }))
+				: [];
+			// 流的身份 = 整份目标清单（父/子/mode）。用字符串做 effect 依赖：目录快照
+			// 的身份与流的存活无关，目标清单不变就不该重跑差分。
+			const targetsKey = targets.map(targetKey).join('\u0001');
+
+			// follow 服务是否可用：决定渲染哪条降级文案，并作为流 effect 的第二个依赖
+			// ——服务晚到一步时依赖翻转会让 effect 重跑，把该开的流补上（effect 自己
+			// 再探一次服务，不复用这个布尔值）。属性访问自带守卫（注入缺席时反射代理
+			// 在取属性时会抛）。
+			let followAvailable = false;
+			try {
+				followAvailable = typeof service('remote.session')?.follow === 'function';
+			} catch (error) {
+				logWarn('remote.session', error);
+			}
+
+			// 展示时钟：只要还有一行在显示"最后活动"就走；没有可走动的时间戳（参数
+			// 畸形的朴素行、结算后才挂载的历史卡）就不建定时器。**结算后不停表**是
+			// 有意的：`timed out … it is still running` 这类结果恰恰要靠"最后活动
+			// 越走越久"来表达子代理没再产出；代价是每张曾活过的卡各持一个 1s 定时器
+			// （只重渲染已有时间戳，不取数据）。
+			const hasAges = Object.values(feeds).some((feed) => feed?.lastTime !== undefined);
 			useEffect(() => {
+				if (!hasAges) return undefined;
 				const timer = setInterval(() => setNow(Date.now()), 1000);
 				return () => clearInterval(timer);
-			}, []);
-			const rows = treeRows(catalog, sessionId, expanded);
-			const running = rows.filter((row) => row.activity === 'running');
-			const expandedKey = [...expanded].sort().join('\n');
+			}, [hasAges]);
 
-			// 声明一层"正在被消费"；展开时再补一次拉取。声明本身让 store 在成员
-			// 变化时去抖刷新，这就是树保持实时而不需要本组件轮询的原因。
-			const declareLevel = (id, open) => {
-				try {
-					service('sessions')?.setSubagentCatalogOpen?.(id, open);
-				} catch (error) {
-					logWarn(`catalog ${id}`, error);
-				}
-			};
-			const refreshLevel = (id) => {
-				try {
-					const pending = service('sessions')?.refreshSubagents?.(id);
-					if (pending !== null && typeof pending === 'object' && typeof pending.then === 'function') {
-						pending.then(undefined, (error) => logWarn(`refresh ${id}`, error));
-					}
-				} catch (error) {
-					logWarn(`refresh ${id}`, error);
-				}
-			};
-
-			// 面板打开即声明根这一层；关闭/卸载即撤销声明。根层只由本 effect 声明
-			// ——`setSubagentCatalogOpen` 是单例布尔，两个 effect 都声明根层就会互相
-			// 释放（展开层 effect 收尾时的 false 会把面板自己的声明一起关掉）。
-			useEffect(() => {
-				declareLevel(sessionId, true);
-				refreshLevel(sessionId);
-				return () => { declareLevel(sessionId, false); };
-			}, [sessionId]);
-
-			// 展开某一层 = 声明该层被消费并拉一次它的目录；收起即撤销声明。这里只动
-			// **差分**：已声明过的层不重复声明、不重拉，只有真的不再需要的层才释放。
-			// 根层跳过（它的声明由上面那个 effect 独占）。
-			useEffect(() => {
-				const declared = declaredLevels.current;
-				const wanted = new Set(expandedKey === '' ? [] : expandedKey.split('\n'));
-				wanted.delete(sessionId);
-				for (const id of wanted) {
-					if (declared.has(id)) continue;
-					declareLevel(id, true);
-					refreshLevel(id);
-				}
-				for (const id of declared) if (!wanted.has(id)) declareLevel(id, false);
-				declaredLevels.current = wanted;
-			}, [expandedKey, sessionId]);
-
-			// 释放放在**卸载专用** effect 里。React 在依赖变化时先跑上一个 effect 的
-			// cleanup：若把释放写在上面那个 effect 的返回值里，declaredLevels 每次都会
-			// 被清空、差分记忆归零，展开第二个层级就会把所有已展开层释放再重拉（多出
-			// 的 RPC + 这些层闪现"加载中"）。空依赖让 ref 跨依赖变化存活。
-			useEffect(() => () => {
-				for (const id of declaredLevels.current) declareLevel(id, false);
-				declaredLevels.current = new Set();
-			}, []);
-
-			/** 更新某节点的折叠状态：update 是要合并的字段，或 (prevFeed) => 新 feed。 */
+			/** 更新某个子代理的折叠状态：update 是要合并的字段，或 (prevFeed) => 新 feed。 */
 			const setFeed = (childSessionId, update) => {
 				setFeeds((prev) => {
 					const previous = prev[childSessionId] ?? {};
@@ -578,36 +596,40 @@ window.__ModuleLoader__.load({
 				});
 			};
 
-			// 每个正在渲染的 running 节点一路流；按 key 差分，只动变化的那几个：
-			// 新目标开流、消失/停止的目标 abort，其余 Map 里的流原样留着。面板卸载
-			// 时 cleanup 全部 abort。任一路失败只标该节点的 status，其余流不受影响。
+			// 每个被等待的 id 一路流；按 key 差分，只动变化的那几个：新目标开流、不再
+			// 需要的目标（名单变化、mode 变化、工具已结算、卡卸载）abort，其余 Map 里
+			// 的流原样留着。任一路失败只标该 id 的 status，其余流不受影响。
 			useEffect(() => {
 				const streams = activeStreams.current;
-				// 服务属性访问必须自带守卫：inject 缺席时 cordis 的反射代理在取
-				// 属性（而非 get）时抛错，整个座位会被错误边界摘掉。
+				// 服务属性访问必须自带守卫：inject 缺席时 cordis 的反射代理在取属性
+				// （而非 get）时抛错，整个座位会被错误边界摘掉。
 				let sessionApi;
+				let follow;
 				try {
 					// `remote.session` 是网关按命名空间注册的独立服务（官方客户端同样
 					// 以 `inject: ['remote', 'remote.session']` 声明）；从 `remote`
 					// 命名空间对象上取属性会走 inject 检查并抛错。
 					sessionApi = service('remote.session');
+					follow = sessionApi?.follow;
 				} catch (error) {
+					// 属性访问被反射代理拒了：与"服务缺席"同一种处理——拿不到 follow
+					// 就本轮的 desired 为空，已开的流照常停掉，异常只进 console。
 					logWarn('remote.session', error);
-					return undefined;
+					sessionApi = undefined;
+					follow = undefined;
 				}
-				const follow = sessionApi?.follow;
-				const desired = typeof follow === 'function' ? running.map((row) => ({ parentSessionId: row.parentSessionId, childSessionId: row.id, mode: row.mode })) : [];
+				const desired = typeof follow === 'function' ? targets : [];
 				const { stop, start } = subscriptionDiff(streams.keys(), desired);
 				for (const key of stop) {
 					streams.get(key)?.abort();
 					streams.delete(key);
 				}
-				// 这条路是否仍归本次执行所有：被 stop/卸载 abort 掉的流不再是，
-				// 它的收场不得再改写 feeds（旧流的迟到结果会覆盖新流的状态）。
+				// 这条路是否仍归本次执行所有：被 stop/卸载 abort 掉的流不再是，它的
+				// 收场不得再改写 feeds（旧流的迟到结果会覆盖新流的状态）。
 				const owned = (key, controller) => streams.get(key) === controller && !controller.signal.aborted;
 				if (start.length === 0) return undefined;
-				// 先标"等着第一帧"，再开流：follow 可能同步抛错，那样失败状态必须
-				// 覆盖 pending，而不是被随后的 pending 批次吞掉。
+				// 先标"等着第一帧"，再开流：follow 可能同步抛错，那样失败状态必须覆盖
+				// pending，而不是被随后的 pending 批次吞掉。
 				setFeeds((prev) => {
 					const next = { ...prev };
 					for (const { target } of start) next[target.childSessionId] = { ...(next[target.childSessionId] ?? {}), status: 'pending' };
@@ -627,170 +649,109 @@ window.__ModuleLoader__.load({
 							}
 						} catch (error) {
 							if (!owned(key, controller)) return;
-							// 一次机会：失败只标"读取失败"并记账，不自动重试——本面板唯一的
-							// 定时器是展示时钟，重连要额外的退避计时，留给下一次面板重开。
+							// 一次机会：失败只标"读取失败"并记账，不自动重试——本卡唯一的
+							// 定时器是展示时钟，重连要额外的退避计时，留给下一次重挂。
 							setFeed(target.childSessionId, { status: 'failed' });
 							logWarn(`follow ${target.childSessionId}`, error);
 							return;
 						}
-						// 流自然收尾（子代理结束）：仍归本次执行才标 idle，否则说明它
-						// 已被 abort/替换，收场状态由新的那一路负责。
+						// 流干净收尾（服务端关掉这一路，或 carrier 重置）：仍归本次执行才
+						// 标 idle，否则说明它已被 abort/替换，收场状态由新的那一路负责。
+						// idle 只表示"这一行没有活流了"，不表示子代理已结束——running 位
+						// 在目录快照里，流的收尾推不出它。
 						if (!owned(key, controller)) return;
 						streams.delete(key);
 						setFeed(target.childSessionId, { status: 'idle' });
 					})();
 				}
-				// 本 effect 的 cleanup 不 abort：依赖变化（目录推送）时 abort 全部
-				// 正是"任一节点翻转打断所有流"的老毛病。abort 只发生在两处——目标
-				// 从目录里消失（上面的 stop）与面板卸载（下面的 unmount effect）。
+				// 本 effect 的 cleanup 不 abort：依赖变化时 abort 全部正是"任一 id 变化
+				// 打断所有流"的老毛病。abort 只发生在两处——目标不再需要（上面的 stop）
+				// 与卡卸载（下面的 unmount effect）。
 				return undefined;
-			}, [running.length, expandedKey, sessionId, catalog]);
+			}, [targetsKey, followAvailable]);
 
-			// 面板卸载：abort 全部活流。必须与上面的 effect 分开——同一个 effect 的
+			// 卡卸载：abort 全部活流。必须与上面的 effect 分开——同一个 effect 的
 			// cleanup 每次依赖变化都会跑，那样 diff 就白做了。
 			useEffect(() => () => {
 				for (const controller of activeStreams.current.values()) controller.abort();
 				activeStreams.current.clear();
 			}, []);
 
-			const openRow = (row) => {
-				try {
-					service('sessions')?.openSubagent?.({ parentSessionId: row.parentSessionId, childSessionId: row.id, mode: row.mode });
-				} catch (error) {
-					logWarn(`open ${row.id}`, error);
-				}
-			};
+			const liveUnavailable = waiting && !followAvailable;
 
-			const toggleRow = (id) => {
-				setExpanded((prev) => {
-					const next = new Set(prev);
-					if (next.has(id)) next.delete(id);
-					else next.add(id);
-					return next;
-				});
-			};
-
-			// 展开层的加载态/失败态：目录里那一层的 state 说了算。只看根层会漏报
-			// 深层的失败——展开的那一层自己得说出它的状态。
-			const levelStatusText = (level) => {
-				if (level === null || typeof level !== 'object') return null;
-				if (level.state === 'loading') return text('treeLoading');
-				if (level.state === 'error') return text('treeLoadFailed');
-				return null;
-			};
-
-			// follow 服务整个不可用（此时不为任何节点开流）：running 行若留白就与
-			// "还没有任何事件"同貌。属性访问自带守卫（注入缺席时反射代理会抛）。
-			let liveUnavailable = false;
-			try {
-				liveUnavailable = running.length > 0 && typeof service('remote.session')?.follow !== 'function';
-			} catch (error) {
-				logWarn('remote.session', error);
-				liveUnavailable = running.length > 0;
-			}
-
-			// 当前可见层的状态行：目录里没有行的层（空的/失败的/加载中的）也得说出
-			// 它自己的状态，否则展开一个空层什么也看不到。可见 = 根层，或它本身也
-			// 展开着（收起的分支不该在面板里报状态）。
-			const visibleStatuses = [];
-			if (catalog !== null && typeof catalog === 'object') {
-				for (const levelId of Object.keys(catalog)) {
-					if (!expanded.has(levelId) || levelId === sessionId) continue;
-					const status = levelStatusText(catalog[levelId]);
-					if (status !== null) visibleStatuses.push({ levelId, status });
-				}
-			}
-			const statusFor = (levelId) => visibleStatuses.find((entry) => entry.levelId === levelId)?.status ?? null;
-
-			const renderRow = (row) => {
-				const feed = feeds[row.id];
+			const renderRow = (id) => {
+				const entry = entries.get(id);
+				const feed = feeds[id];
+				const label = typeof entry?.label === 'string' && entry.label !== '' ? entry.label : id;
+				// 状态只认目录快照：子代理的 running 位由 store 用推送帧折进已加载的目录
+				// （session-controller 的 updateCatalogActivity），所以这一列是实时的，
+				// 官方子代理界面同样只看这一处。快照里没有这个 id 就不声称状态（中性
+				// 圆点）——follow 流本身不携带 running 位，"流还开着"推断不出"还在跑"，
+				// 刚派发、尚未启动的子代理就会被说成运行中。
+				const activity = entryActivity(entry);
 				const parts = [];
 				if (feed?.lastTool !== undefined) parts.push(`${text('treeLastTool')} ${feed.lastTool}`);
 				if (feed?.lastText !== undefined) parts.push(feed.lastText);
-				const data = parts.join(' · ');
 				// 已折叠出来的内容优先于状态文案：状态是"还没有内容"的说明，不是它的
-				// 替代品。这一行自己没内容时才轮到自己那一路的流状态，然后才是它所在
-				// 层的状态；"实时不可用"整层说一次就够（它不属于某一行）。
-				let detail = data;
-				if (detail === '') detail = feed?.status === 'failed' ? text('treeReadFailed') : feed?.status === 'pending' ? text('treeLoading') : null;
-				if (detail === null) detail = statusFor(row.parentSessionId);
+				// 替代品。这一行自己没内容时才轮到自己那一路的流状态；"实时不可用"
+				// 整卡说一次就够（它不属于某一行）。
+				let detail = parts.join(' · ');
+				// 结算后不再有活流能改写 feed：此时 `pending` 是"结算前第一帧还没到"
+				// 的残留（工具对早已完成的子代理会在首帧到达前就返回），再显示"加载中"
+				// 就是永久谎报。结算态下 pending 一律按"没有内容"处理。
+				if (detail === '') {
+					detail = feed?.status === 'failed'
+						? text('treeReadFailed')
+						: feed?.status === 'pending' && !settled ? text('treeLoading') : null;
+				}
 				if (detail === null && liveUnavailable) detail = text('treeLiveUnavailable');
 				if (detail === null) detail = '';
 				const age = feed?.lastTime === undefined ? undefined : formatAge(now - feed.lastTime);
-				const isOpen = expanded.has(row.id);
 				const ageKey = age?.unit === 'hours' ? 'treeAgeHours' : age?.unit === 'minutes' ? 'treeAgeMinutes' : 'treeAgeSeconds';
-				const rowNode = h('div', { key: row.id, style: { ...styles.treeRow, paddingLeft: `${row.depth * 16}px` } },
-					h('div', { style: styles.treeRowHead },
-						row.hasChildren
-							? h('button', {
-								type: 'button',
-								style: styles.treeToggle,
-								title: isOpen ? text('treeCollapse') : text('treeExpand'),
-								onClick: () => toggleRow(row.id),
-							}, isOpen ? '▾' : '▸')
-							: h('span', { style: styles.treeToggleSpacer }),
-						h('button', { type: 'button', style: styles.treeLabel, title: row.id, onClick: () => openRow(row) }, row.label ?? row.id),
-						h('span', { style: row.activity === 'running' ? styles.dotRunning : styles.dotIdle }, '●'),
-						h('span', { style: styles.treeMeta }, text(row.activity === 'running' ? 'treeRunning' : 'treeInactive')),
-						age === undefined ? null : h('span', { style: styles.treeMeta }, `${text('treeLastActive')} ${text(ageKey, { n: age.value })}`)),
-					detail === '' || detail === undefined ? null : h('div', { style: styles.treeDetail }, detail));
-				// 展开层自己的状态行：跟在它父行之后，缩进一层。
-				const levelStatus = statusFor(row.id);
-				return levelStatus === null
-					? rowNode
-					: [rowNode, h('div', { key: `${row.id}:level`, style: { ...styles.treeDetail, paddingLeft: `${(row.depth + 1) * 16}px` } }, levelStatus)];
+				return h('div', { key: id, style: styles.waitRow },
+					h('div', { style: styles.waitRowHead },
+						h('span', { style: activity === 'running' ? styles.dotRunning : styles.dotIdle }, '●'),
+						h('span', { style: styles.waitLabel, title: id }, label),
+						activity === undefined ? null : h('span', { style: styles.waitMeta }, text(activity === 'running' ? 'treeRunning' : 'treeInactive')),
+						age === undefined ? null : h('span', { style: styles.waitMeta }, `${text('treeLastActive')} ${text(ageKey, { n: age.value })}`)),
+					detail === '' ? null : h('div', { style: styles.waitDetail }, detail));
 			};
 
-			const level = catalog?.[sessionId];
-			const rootState = level !== null && typeof level === 'object' ? level.state : undefined;
-			const body = rows.length > 0
-				? rows.map(renderRow)
-				: catalogUnavailable
-					? h('p', { style: styles.treeError }, text('treeCatalogUnavailable'))
-					: rootState === 'loading'
-						? h('p', { style: styles.treeEmpty }, text('treeLoading'))
-						: rootState === 'error'
-							? h('p', { style: styles.treeError }, text('treeLoadFailed'))
-							: h('p', { style: styles.treeEmpty }, text('treeEmpty'));
+			const children = [];
+			const headTitle = waited.ids.length > 0
+				? text(settled ? 'waitTitleSettled' : 'waitTitleRunning', { n: waited.ids.length })
+				: typeof props?.toolName === 'string' && props.toolName !== '' ? props.toolName : 'wait_subagent';
+			children.push(h('div', { key: 'head', style: styles.cardHead },
+				h('span', { style: styles.cardTitle }, headTitle),
+				waited.truncated > 0 ? h('span', { style: styles.cardMeta }, text('waitMore', { n: waited.truncated })) : null));
+			if (waited.ids.length > 0) {
+				children.push(...waited.ids.map(renderRow));
+			} else {
+				// 参数畸形、subagent_id 为空或调用头落在窗口外：退回"工具名 + 原始
+				// 参数"的朴素行，既不开流也不留空白。
+				const argsText = clampText(argsRaw);
+				const argsTitle = typeof argsRaw === 'string' && argsRaw !== '' ? argsRaw : undefined;
+				if (argsText !== undefined) children.push(h('div', { key: 'args', style: styles.fallbackArgs, title: argsTitle }, argsText));
+			}
+			const result = settled ? resultTextOf(block) : undefined;
+			if (result !== undefined) {
+				children.push(h('div', { key: 'result', style: styles.resultBox },
+					h('div', { style: styles.resultLabel }, text('waitResult')),
+					h('div', { style: block.isError === true ? styles.resultFailed : styles.resultText }, result)));
+			}
 
-			return h('div', { style: styles.treePanel, role: 'dialog', 'aria-label': text('treeTitle') },
-				h('div', { style: styles.treePanelHead },
-					h('span', { style: styles.treePanelTitle }, text('treeTitle')),
-					h('button', { type: 'button', style: styles.treeClose, title: text('treeClose'), onClick: onClose }, '×')),
-				h('div', { style: styles.treePanelBody }, body));
+			return h('div', { style: styles.card, role: 'group', 'aria-label': headTitle }, children);
 		}
 
 		/**
-		 * 会话标题栏座位：树形按钮 + 运行中数量徽标；展开时挂载浮动面板。
-		 * 面板收起/卸载即卸载面板组件，其订阅随 effect 清理一并 release。
+		 * 客户端服务依赖：实时内容来自 `ctx.get('remote.session')`（网关按命名空间
+		 * 注册的独立服务，取属性要通过 inject 检查，故必须成对声明——官方客户端
+		 * 同样写 `['remote', 'remote.session']`）。子代理目录**不**在这里声明：行的
+		 * 标签/状态/mode 全部来自框架派发的标准钩子 `props.useSessions`，与插件
+		 * inject 无关；声明 `sessions` 只会让本插件在该服务缺席时整体不加载，反而
+		 * 挡住卡片与设置页的降级路径。
 		 */
-		function SubagentTreeSeat(props) {
-			const [open, setOpen] = useState(false);
-			const sessionId = props?.sessionId;
-			const text = translator(props?.t);
-			// 目录选择器抛错或 props.useSessions 缺席时退回共享空目录，并把"目录
-			// 不可用"与"暂无子代理"分开：读不到目录不等于没有子代理。
-			const selected = catalogFrom(props?.useSessions);
-			const catalogUnavailable = selected === undefined;
-			const catalog = selected ?? NO_CATALOG;
-			const running = countRunning(catalog, sessionId);
-
-			return h('span', { style: styles.seat },
-				h('button', {
-					type: 'button',
-					style: styles.headerButton,
-					title: text('treeTitle'),
-					'aria-expanded': open ? 'true' : 'false',
-					onClick: () => setOpen((value) => !value),
-				},
-					h('span', null, text('treeButton')),
-					running > 0 ? h('span', { style: styles.badge }, String(running)) : null),
-				// key=sessionId：座位万一跨会话存活，展开集合、已声明层与 feeds 必须随
-				// 根会话一起换新，否则旧层的"正在被消费"声明会一直挂到关面板。
-				open ? h(SubagentTreePanel, { key: sessionId, sessionId, catalog, catalogUnavailable, text, onClose: () => setOpen(false) }) : null);
-		}
-
-		const inject = ['slots', 'locale', 'sessions', 'remote', 'remote.session'];
+		const inject = ['slots', 'locale', 'remote', 'remote.session'];
 
 		/** 两个座位各自 try/catch：一个座位注册失败不得连累另一个。 */
 		function mount(ctx) {
@@ -815,17 +776,18 @@ window.__ModuleLoader__.load({
 					return () => {};
 				}
 			});
-			ctx.slots.inject('conversation.session.header.actions', () => {
+			ctx.slots.inject('tool.call.toolview', () => {
 				try {
+					// key 是 wire 工具名本身：这个座位按工具名分发，注册即接管
+					// `wait_subagent` 的工具卡（没有 entry 认领的键才退回通用工具行）。
 					return ctx.slots.register({
-						name: 'conversation.session.header.actions',
-						id: 'eng-subagent-tree',
-						order: 40,
+						name: 'tool.call.toolview',
+						key: 'wait_subagent',
+						order: 10,
 						locale: NS,
-						inject: () => ({}),
-					}, SubagentTreeSeat);
+					}, WaitSubagentCard);
 				} catch (error) {
-					logWarn('register subagent tree seat', error);
+					logWarn('register wait_subagent card', error);
 					return () => {};
 				}
 			});
@@ -843,15 +805,14 @@ window.__ModuleLoader__.load({
 		exports.inject = inject;
 		exports.apply = apply;
 		/**
-		 * node 单测接缝：纯折叠/格式化/树形摊平函数与两个组件，浏览器半边不读取它。
+		 * node 单测接缝：纯解析/折叠/格式化函数与卡片组件，浏览器半边不读取它。
 		 * 组件导出是为了让测试用最小 hooks 运行时驱动真实 effect（流差分/abort/失败
 		 * 标记都只在 effect 里发生，纯函数测不到）。
-		 * @see tests/subagent-tree.test.mjs
+		 * @see tests/wait-subagent-card.test.mjs
 		 */
 		exports.__test = {
-			foldEvents, formatAge, treeRows, followRequest,
-			subscriptionDiff, targetKey, targetRecords,
-			SubagentTreePanel, SubagentTreeSeat,
+			foldEvents, formatAge, followRequest, subscriptionDiff, targetKey, targetRecords,
+			waitedIds, WaitSubagentCard,
 			zh, en,
 		};
 		return module.exports;

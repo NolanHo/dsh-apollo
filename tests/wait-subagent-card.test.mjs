@@ -4,8 +4,8 @@
  * 1. 装载层：fake `window.__ModuleLoader__` + fake `require('react')`（模块体只
  *    注册工厂，与真实浏览器加载同构），断言注册契约、locale 词典与包清单注入。
  * 2. 组件层：最小 hooks 运行时（useState/useEffect/useRef，见 makeReact）驱动真实
- *    组件，断言 effect 的行为——流差分、失败标记、abort 清理、展开层声明差分。
- *    这些只在 effect 里发生，纯函数测不到。
+ *    组件，断言 effect 的行为——按 id 开流与差分、结算即释放、失败标记、abort
+ *    清理、展示时钟。这些只在 effect 里发生，纯函数测不到。
  *
  * 不起浏览器：真实 GUI 由 Lead 在第二个 dsh 实例上验证。
  */
@@ -39,8 +39,6 @@ function inertHooks() {
   }
 }
 let runtime = inertHooks()
-/** 当前用例共享的 hooks 运行时实例（见 useReactRuntime）。 */
-let installed
 const react = {
   createElement: (...args) => runtime.createElement(...args),
   useEffect: (...args) => runtime.useEffect(...args),
@@ -89,18 +87,19 @@ test('工厂：注册包名行并导出 inject/apply/__test 接缝', () => {
   assert.equal(definition.id, 'dsh-apollo')
   assert.equal(typeof definition.factory, 'function')
   assert.equal(typeof client.apply, 'function')
-  assert.deepEqual(client.inject, ['slots', 'locale', 'sessions', 'remote', 'remote.session'])
+  assert.deepEqual(client.inject, ['slots', 'locale', 'remote', 'remote.session'])
   assert.deepEqual(Object.keys(client.__test).sort(), [
-    'SubagentTreePanel', 'SubagentTreeSeat', 'en', 'foldEvents', 'followRequest', 'formatAge',
-    'subscriptionDiff', 'targetKey', 'targetRecords', 'treeRows', 'zh',
+    'WaitSubagentCard', 'en', 'foldEvents', 'followRequest', 'formatAge',
+    'subscriptionDiff', 'targetKey', 'targetRecords', 'waitedIds', 'zh',
   ])
 })
 
-test('apply：保留设置页标签，并新增标题栏子代理树座位', () => {
+test('apply：保留设置页标签，并按工具名接管 wait_subagent 的工具卡', () => {
   const { ctx, injected, seats, effects } = makeCtx()
   client.apply(ctx)
 
-  assert.deepEqual(injected, ['settings.plugins.tab', 'conversation.session.header.actions'])
+  // 标题栏座位已撤掉：本插件不再注入 conversation.session.header.actions。
+  assert.deepEqual(injected, ['settings.plugins.tab', 'tool.call.toolview'])
 
   const settings = seatOf(seats, 'settings.plugins.tab')
   assert.equal(settings.registration.id, 'eng')
@@ -108,12 +107,14 @@ test('apply：保留设置页标签，并新增标题栏子代理树座位', () 
   assert.equal(settings.registration.locale, 'eng-panel')
   assert.equal(typeof settings.component, 'function')
 
-  const tree = seatOf(seats, 'conversation.session.header.actions')
-  assert.equal(tree.registration.id, 'eng-subagent-tree')
-  assert.equal(tree.registration.order, 40)
-  assert.equal(tree.registration.locale, 'eng-panel')
-  assert.deepEqual(tree.registration.inject(), {})
-  assert.equal(typeof tree.component, 'function')
+  // 键就是 wire 工具名本身：注册即接管该工具的卡（未认领的键才退回通用工具行）。
+  const card = seatOf(seats, 'tool.call.toolview')
+  assert.equal(card.registration.key, 'wait_subagent')
+  assert.equal(card.registration.order, 10)
+  assert.equal(card.registration.locale, 'eng-panel')
+  assert.equal(Object.hasOwn(card.registration, 'id'), false)
+  // 组件身份必须钉死：只断言"是个函数"的话，注册成别的组件也照样绿。
+  assert.equal(card.component, client.__test.WaitSubagentCard)
 
   assert.deepEqual(effects, ['eng-panel: dictionaries'])
 })
@@ -142,10 +143,9 @@ test('locale：座位与词典同 ns，zh/en 键集一致且覆盖全部词条',
   assert.deepEqual(Object.keys(zh).sort(), [
     'description', 'guardHint', 'guardLabel', 'loadFailed', 'loading', 'retry', 'save', 'saveFailed',
     'saved', 'saving', 'tab', 'title',
-    'treeAgeHours', 'treeAgeMinutes', 'treeAgeSeconds', 'treeButton', 'treeCatalogUnavailable',
-    'treeClose', 'treeCollapse', 'treeEmpty', 'treeExpand', 'treeInactive', 'treeLastActive',
-    'treeLastTool', 'treeLiveUnavailable', 'treeLoadFailed', 'treeLoading', 'treeReadFailed',
-    'treeRunning', 'treeTitle',
+    'treeAgeHours', 'treeAgeMinutes', 'treeAgeSeconds', 'treeInactive', 'treeLastActive',
+    'treeLastTool', 'treeLiveUnavailable', 'treeLoading', 'treeReadFailed', 'treeRunning',
+    'waitMore', 'waitResult', 'waitTitleRunning', 'waitTitleSettled',
   ])
   assert.deepEqual(Object.keys(en).sort(), Object.keys(zh).sort())
   for (const key of Object.keys(zh)) {
@@ -153,8 +153,8 @@ test('locale：座位与词典同 ns，zh/en 键集一致且覆盖全部词条',
     assert.equal(typeof en[key], 'string', `en.${key} must be a string`)
   }
 
-  // 插值词条必须保留 {n} 占位符，否则档位数字无处可填。
-  for (const key of ['treeAgeSeconds', 'treeAgeMinutes', 'treeAgeHours']) {
+  // 插值词条必须保留 {n} 占位符，否则档位数字/条数无处可填。
+  for (const key of ['treeAgeSeconds', 'treeAgeMinutes', 'treeAgeHours', 'waitTitleRunning', 'waitMore']) {
     assert.equal(zh[key].includes('{n}'), true, `zh.${key}`)
     assert.equal(en[key].includes('{n}'), true, `en.${key}`)
   }
@@ -174,13 +174,13 @@ test('package.json：dsh.client.inject 声明了座位依赖的客户端包', as
   const inject = manifest.dsh?.client?.inject
   assert.equal(Array.isArray(inject), true)
   assert.equal(manifest.dsh.client.platform, 'web')
-  // 这行清单决定浏览器加载哪些 client 半边：缺 session-controller 就没有
-  // sessions 服务（目录不可用），缺 remotes 就没有 remote.session（实时不可用）。
+  // 这行清单决定浏览器加载哪些 client 半边：缺 session-controller 就没有会话目录
+  // （卡里的标签/状态取不到），缺 remotes 就没有 remote.session（实时不可用）。
   for (const name of ['@deepseek-ai/dsh-api-session-controller', '@deepseek-ai/dsh-api-remotes']) {
     assert.equal(inject.includes(name), true, `dsh.client.inject missing ${name}`)
   }
-  // 座位自身的 inject 必须与之对齐：声明了服务却没有对应包 = 座位拿不到服务。
-  assert.deepEqual(client.inject, ['slots', 'locale', 'sessions', 'remote', 'remote.session'])
+  // 插件声明的服务与这行清单成对：清单加载模块，inject 声明依赖，少一边就是半个座位。
+  assert.deepEqual(client.inject, ['slots', 'locale', 'remote', 'remote.session'])
 })
 
 test('foldEvents：助手文本与工具名折叠成最后一行/最后工具/最后活动时间', () => {
@@ -225,7 +225,7 @@ test('foldEvents：接受 snapshot 的记录信封，并接着上一次的状态
 
 test('foldEvents：user/message 是回合边界，清空上一轮的最后一行/最后工具', () => {
   // fork 种子前缀：父会话的最后一行与最后一个工具先到达，然后是子代理自己的用户
-  // 输入。不重置的话，子代理还没产出时面板显示的是父会话的内容。
+  // 输入。不重置的话，子代理还没产出时卡片显示的是父会话的内容。
   const seeded = client.__test.foldEvents([
     { type: 'tool/call', seq: 1, time: 10, data: { name: 'parent-tool' } },
     { type: 'assistant/message', seq: 2, time: 20, data: { message: { content: [{ type: 'text', text: '父会话的最后一行' }] } } },
@@ -307,52 +307,36 @@ test('formatAge：秒/分钟/小时三档；边界与非法输入', () => {
   assert.deepEqual(formatAge(undefined), { unit: 'seconds', value: 0 })
 })
 
-const catalog = {
-  root: {
-    state: 'ready',
-    entries: [
-      { kind: 'child', id: 'a', activity: 'running', hasChildren: true, mode: 'continuable', label: 'A' },
-      { kind: 'child', id: 'b', activity: 'inactive', hasChildren: false, mode: 'one-shot' },
-      { kind: 'diagnostic', id: 'c', reason: 'corrupt' },
-    ],
-  },
-  a: {
-    state: 'ready',
-    entries: [{ kind: 'child', id: 'a1', activity: 'running', hasChildren: false, mode: 'one-shot', label: 'A1' }],
-  },
-}
+test('waitedIds：解析名单、去重保序，并挡住畸形参数与超长名单', () => {
+  const { waitedIds } = client.__test
 
-test('treeRows：深度优先摊平，未展开的节点不渲染下一层', () => {
-  const collapsed = client.__test.treeRows(catalog, 'root', new Set())
-  assert.deepEqual(collapsed.map((row) => [row.id, row.depth]), [['a', 0], ['b', 0]])
-  assert.deepEqual(collapsed[0], {
-    id: 'a',
-    parentSessionId: 'root',
-    mode: 'continuable',
-    label: 'A',
-    activity: 'running',
-    hasChildren: true,
-    depth: 0,
-  })
-  assert.equal(collapsed[1].label, undefined)
-  assert.equal(collapsed[1].mode, 'one-shot')
+  assert.deepEqual(waitedIds(JSON.stringify({ subagent_id: ['a', 'b'] })), { ids: ['a', 'b'], truncated: 0 })
+  // 工具自身也去重保序（new Set），卡与它显示同一份名单。
+  assert.deepEqual(waitedIds(JSON.stringify({ subagent_id: ['b', 'a', 'b'] })), { ids: ['b', 'a'], truncated: 0 })
+  // 非字符串项/空串跳过，字符串项保留。
+  assert.deepEqual(waitedIds(JSON.stringify({ subagent_id: ['a', 3, null, '', {}, 'b'] })), { ids: ['a', 'b'], truncated: 0 })
 
-  const expanded = client.__test.treeRows(catalog, 'root', ['a'])
-  assert.deepEqual(expanded.map((row) => [row.id, row.depth]), [['a', 0], ['a1', 1], ['b', 0]])
-  assert.equal(expanded[1].parentSessionId, 'a')
-})
+  // 非数组、缺字段、非对象根、畸形 JSON、非字符串参数：一律空名单（由卡退回朴素行）。
+  const malformed = [
+    JSON.stringify({ subagent_id: 'a' }),
+    JSON.stringify({ timeout_ms: 1000 }),
+    JSON.stringify({ subagent_id: {} }),
+    '{"subagent_id": ["a"',
+    'null',
+    '"a"',
+    '42',
+    '[]',
+    '',
+    undefined,
+    null,
+  ]
+  for (const raw of malformed) assert.deepEqual(waitedIds(raw), { ids: [], truncated: 0 }, String(raw))
 
-test('treeRows：畸形目录不抛，损坏的自环不递归失控', () => {
-  const { treeRows } = client.__test
-  assert.deepEqual(treeRows(undefined, 'root', []), [])
-  assert.deepEqual(treeRows(null, 'root', []), [])
-  assert.deepEqual(treeRows({ root: { entries: 'nope' } }, 'root', []), [])
-  assert.deepEqual(treeRows({ root: { entries: [null, 3, { kind: 'child' }, { kind: 'child', id: '' }] } }, 'root', []), [])
-
-  const cyclic = {
-    root: { entries: [{ kind: 'child', id: 'root', activity: 'running', hasChildren: true, mode: 'one-shot' }] },
-  }
-  assert.deepEqual(treeRows(cyclic, 'root', ['root']).map((row) => row.id), ['root'])
+  // 上限：超出的条数如实报出，不假装名单只有 LIMIT 条。
+  const many = Array.from({ length: 10 }, (_, index) => `id-${index}`)
+  const capped = waitedIds(JSON.stringify({ subagent_id: many }))
+  assert.deepEqual(capped.ids, many.slice(0, 8))
+  assert.equal(capped.truncated, 2)
 })
 
 test('followRequest：子代理地址带 kind 判别标签，且不传非法字段', () => {
@@ -385,7 +369,7 @@ test('subscriptionDiff：集合变化只影响变化项，未变的流原样保�
     stop: [],
     start: [{ key: keyA, target: targetA }, { key: keyB, target: targetB }],
   })
-  // 稳态：目录里其它节点 activity 翻转导致的重复执行不重开任何一路。
+  // 稳态：目录里其它 id 的状态翻转导致的重复执行不重开任何一路。
   assert.deepEqual(subscriptionDiff([keyA, keyB], [targetB, targetA]), { stop: [], start: [] })
   // 只增：新增 c 只开 c，a/b 不动。
   assert.deepEqual(subscriptionDiff([keyA, keyB], [targetA, targetB, targetC]), {
@@ -437,7 +421,7 @@ function makeReact() {
   let target = null
   let tree = null
   // 每个组件函数一段固定槽位：同一组件跨渲染不换段，父子不共用下标。基准值只增
-  // 不减（同一用例里座位与它嵌的面板是两个函数，不能都从 0 起）。
+  // 不减（同一用例里可能出现多个组件函数，不能都从 0 起）。
   const SLOT_STRIDE = 32
   const slotBase = new Map()
   let slotNext = 0
@@ -541,7 +525,7 @@ function makeReact() {
       get tree() { return tree },
       /** 跑完被 setState 标脏的渲染与 effect（模拟 React 的异步提交）。 */
       flush: async () => { await runEffects() },
-      /** 换 props 重渲染（模拟 store 推送后父组件重渲染）；仍返回驱动本身。 */
+      /** 换 props 重渲染（模拟工具块从运行中变成已结算）；仍返回驱动本身。 */
       rerender: async (nextProps) => {
         target = () => ({ type: Component, props: nextProps })
         performRender()
@@ -595,15 +579,6 @@ function useReactRuntime(t) {
     runtime = inertHooks()
   })
   return made
-}
-
-/** fake sessions 服务：记录 declare/refresh/open 调用。 */
-function makeSessions(calls = []) {
-  return {
-    setSubagentCatalogOpen: (parentSessionId, open) => { calls.push(['declare', parentSessionId, open]) },
-    refreshSubagents: (parentSessionId) => { calls.push(['refresh', parentSessionId]); return Promise.resolve() },
-    openSubagent: (address) => { calls.push(['open', address.childSessionId]) },
-  }
 }
 
 /** apply 一个只提供给定服务的 fake ctx（座位运行时经 ctx.get 读服务）。 */
@@ -664,104 +639,229 @@ function textOf(node, out = []) {
   return out
 }
 
-/** 递归找第一个满足谓词的元素。 */
-function findElement(node, predicate) {
-  if (node === null || node === undefined || typeof node !== 'object') return undefined
-  if (Array.isArray(node)) {
-    for (const child of node) {
-      const found = findElement(child, predicate)
-      if (found !== undefined) return found
-    }
-    return undefined
-  }
-  if (!('props' in node)) return undefined
-  if (predicate(node)) return node
-  return findElement(node.props.children, predicate)
+/** 单个目录子条目（SubagentListEntry 的 child 分支）。 */
+function child(id, { activity = 'running', mode = 'continuable', label } = {}) {
+  return { kind: 'child', id, activity, mode, hasChildren: false, ...(label === undefined ? {} : { label }) }
 }
 
-/** 收集所有满足谓词的元素（顺序即遍历顺序）。 */
-function findAllElements(node, predicate, out = []) {
-  if (node === null || node === undefined || typeof node !== 'object') return out
-  if (Array.isArray(node)) {
-    for (const child of node) findAllElements(child, predicate, out)
-    return out
-  }
-  if (!('props' in node)) return out
-  if (predicate(node)) out.push(node)
-  findAllElements(node.props.children, predicate, out)
-  return out
+/** 本会话那一层目录（subagentsByParent 的一条）。 */
+function catalogWith(entries) {
+  return { root: { state: 'ready', entries } }
 }
 
-/** 面板 props：默认走真实词典的中文分支（与 __test.zh 同源）。 */
-function panelProps({ tree = {}, catalogUnavailable = false, sessionId = 'root' } = {}) {
+/** 运行中的工具块：RunningToolCall 没有 kind 字段，参数在 argsRaw。 */
+function runningBlock(ids, { argsRaw } = {}) {
   return {
+    callId: 'call-1',
+    name: 'wait_subagent',
+    argsRaw: argsRaw ?? JSON.stringify({ subagent_id: ids }),
+    turn: 1,
+    step: 1,
+    time: 1,
+    subCalls: [],
+  }
+}
+
+/** 已结算的工具块：ToolResultNode，参数在 call?.argsRaw（窗口截断时 call 为 null）。 */
+function settledBlock({ ids = [], result, isError = false, truncated = false } = {}) {
+  return {
+    kind: 'tool-result',
+    seq: 2,
+    time: 2,
+    callId: 'call-1',
+    call: truncated ? null : { name: 'wait_subagent', argsRaw: JSON.stringify({ subagent_id: ids }) },
+    content: result === undefined ? [] : [{ type: 'text', text: result }],
+    isError,
+    subCalls: [],
+  }
+}
+
+/**
+ * 卡片 props：默认走真实词典的中文分支（与 __test.zh 同源），目录选择器是一个
+ * 普通函数（组件只在渲染期调用它，与真实 hook 的调用位点同形）。
+ */
+function cardProps({ block, catalog, sessionId = 'root', toolName = 'wait_subagent', useSessions } = {}) {
+  return {
+    callId: block.callId ?? 'call-1',
+    toolName,
+    block,
     sessionId,
-    catalog: tree,
-    catalogUnavailable,
-    text: (key, params) => {
+    useSessions: useSessions ?? ((selector) => selector({ subagentsByParent: catalog ?? {} })),
+    t: (key, params) => {
       const template = zh[key] ?? key
       return params === undefined ? template : template.replace(/\{n\}/g, String(params.n))
     },
-    onClose: () => {},
   }
 }
 
-/** 每次都新建引用：模拟 store 推送产生的新快照对象。 */
-function twoRunningCatalog({ a = 'running', b = 'running', extra = [] } = {}) {
-  return {
-    root: {
-      state: 'ready',
-      entries: [
-        { kind: 'child', id: 'a', activity: a, hasChildren: true, mode: 'one-shot', label: 'A' },
-        { kind: 'child', id: 'b', activity: b, hasChildren: false, mode: 'continuable', label: 'B' },
-        ...extra,
-      ],
-    },
-  }
-}
+/** 每行"最后活动 N <秒/分钟/小时>前"的形态（数字由展示时钟决定）。 */
+const AGE_LINE = new RegExp(`^${zh.treeLastActive} \\d+ (秒|分钟|小时)前$`)
 
-test('组件：只对 running 节点开流，节点停转只 abort 那一路', async (t) => {
+test('卡片：运行中为每个 id 开一路流（mode 取目录，查不到按 continuable），推帧落到对应行', async (t) => {
   const { mount } = useReactRuntime(t)
   const { remote, calls, push } = makeRemote()
-  applyWith({ sessions: makeSessions(), 'remote.session': remote })
+  applyWith({ 'remote.session': remote })
 
-  const view = await mount(client.__test.SubagentTreePanel, panelProps({ tree: twoRunningCatalog() }))
-  assert.equal(calls.length, 2, 'each running node gets its own stream')
+  const catalog = catalogWith([
+    child('a', { mode: 'one-shot', label: 'A' }),
+    { kind: 'diagnostic', id: 'b', reason: 'corrupt' },
+  ])
+  const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']), catalog }))
+
+  assert.equal(calls.length, 2, 'each waited id gets its own stream')
   assert.deepEqual(
-    calls.map((call) => [call.request.address.childSessionId, call.request.address.mode, call.request.maxMessages]),
-    [['a', 'one-shot', 4], ['b', 'continuable', 4]],
+    calls.map((call) => [call.request.address.parentSessionId, call.request.address.childSessionId, call.request.address.mode, call.request.maxMessages]),
+    [['root', 'a', 'one-shot', 4], ['root', 'b', 'continuable', 4]],
   )
   assert.equal(calls.every((call) => call.signal.aborted === false), true)
 
-  // 帧到达 → 该节点的最后工具/最后一行落到渲染里。
+  const initial = textOf(view.tree)
+  assert.equal(initial.includes('等待 2 个子代理'), true, 'running title carries the count')
+  assert.equal(initial.includes('A'), true, 'label comes from the catalog')
+  assert.equal(initial.includes('b'), true, 'a diagnostic entry is not a row, so the id stands in for it')
+  assert.equal(initial.filter((line) => line === zh.treeLoading).length, 2, 'both rows wait for their first frame')
+
+  // 帧到达 → 该 id 的最后工具/最后一行落到该行，时间走起来。
   await push(0, { type: 'event', event: { type: 'tool/call', seq: 1, time: Date.now(), data: { name: 'rg' } } })
   await push(0, { type: 'event', event: { type: 'assistant/message', seq: 2, time: Date.now(), data: { message: { content: [{ type: 'text', text: '正在读 spec' }] } } } })
+  // 真实流的第一帧是窗口化开场快照（records 是 { type: 'event', event } 信封），
+  // 折叠路径必须同时吃这两种帧。
+  await push(1, {
+    type: 'snapshot',
+    header: {},
+    cursor: 2,
+    records: [
+      { type: 'event', event: { type: 'tool/call', seq: 1, time: Date.now(), data: { name: 'ls' } } },
+      { type: 'event', event: { type: 'assistant/message', seq: 2, time: Date.now(), data: { message: { content: [{ type: 'text', text: '开场快照' }] } } } },
+    ],
+    hasMore: false,
+  })
   await view.flush()
   const lines = textOf(view.tree)
   assert.equal(lines.includes(`${zh.treeLastTool} rg · 正在读 spec`), true, 'folded tool + last line')
-
-  // a 停转（目录推送翻转 activity）：只 abort a 那一路，b 原样保留。
-  await view.rerender(panelProps({ tree: twoRunningCatalog({ a: 'inactive' }) }))
-  assert.equal(calls.length, 2, 'no stream was reopened')
-  assert.equal(calls[0].aborted, true, 'stopped node aborted')
-  assert.equal(calls[1].aborted, false, 'untouched node kept its stream')
-
-  // 与流无关的目录变化（多一个 inactive 节点）不重开任何一路。
-  const before = calls.length
-  await view.rerender(panelProps({
-    tree: twoRunningCatalog({
-      a: 'inactive',
-      extra: [{ kind: 'child', id: 'c', activity: 'inactive', hasChildren: false, mode: 'one-shot' }],
-    }),
-  }))
-  assert.equal(calls.length, before)
+  assert.equal(lines.includes(`${zh.treeLastTool} ls · 开场快照`), true, 'an opening snapshot folds like live frames')
+  assert.equal(lines.filter((line) => AGE_LINE.test(line)).length, 2, 'last-active age is rendered per row')
+  assert.equal(lines.includes(zh.treeLoading), false, 'both rows left their loading state')
 
   // 卸载：所有活流 abort。
   await view.unmount()
   assert.equal(calls.every((call) => call.aborted === true), true, 'cleanup aborts every stream')
 })
 
-test('组件：某一路 follow 失败只标该节点读取失败，其余流不受影响', async (t) => {
+test('卡片：状态只认目录快照，快照里没有这个 id 就不声称状态', async (t) => {
+  const { mount } = useReactRuntime(t)
+  const { remote } = makeRemote()
+  applyWith({ 'remote.session': remote })
+
+  // b 的目录条目已经翻成 inactive（快照说了算，即使它那一路流还开着）。
+  const catalog = catalogWith([child('a', { label: 'A' }), child('b', { activity: 'inactive', label: 'B' })])
+  const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']), catalog }))
+  const lines = textOf(view.tree)
+  assert.equal(lines.includes('A'), true)
+  assert.equal(lines.filter((line) => line === zh.treeRunning).length, 1, 'the catalog-running row claims running')
+  assert.equal(lines.filter((line) => line === zh.treeInactive).length, 1, 'the snapshot wins over the open stream')
+  assert.equal(lines.some((line) => line.startsWith(zh.treeLastTool)), false, 'nothing folded yet')
+  await view.unmount()
+
+  // 目录里查不到这个 id：只留中性圆点与 id，不替目录猜 running/inactive。
+  const unknown = await mount(client.__test.WaitSubagentCard, cardProps({
+    block: runningBlock(['a', 'b']),
+    catalog: catalogWith([child('a', { activity: 'inactive', label: 'A' })]),
+  }))
+  const unknownLines = textOf(unknown.tree)
+  assert.equal(unknownLines.includes('b'), true, 'the id still renders')
+  assert.equal(unknownLines.filter((line) => line === zh.treeRunning).length, 0, 'an open stream is not evidence that the child is running')
+  assert.equal(unknownLines.filter((line) => line === zh.treeInactive).length, 1, 'only the id the catalog knows about claims a status')
+  assert.equal(unknownLines.includes(zh.treeLoading), true, "the unknown id's stream is still waiting for its first frame")
+})
+
+test('卡片：工具结算即 abort 全部流、保留结束前的信息、显示返回文本、不再开新流', async (t) => {
+  const { mount } = useReactRuntime(t)
+  const { remote, calls, push } = makeRemote()
+  applyWith({ 'remote.session': remote })
+
+  const catalog = catalogWith([child('a', { label: 'A' })])
+  const result = 'subagent a done (completed); its closing message follows as the settlement notice.'
+  let view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']), catalog }))
+  await push(0, { type: 'event', event: { type: 'assistant/message', seq: 1, time: Date.now(), data: { message: { content: [{ type: 'text', text: '收尾中' }] } } } })
+  await view.flush()
+  assert.equal(textOf(view.tree).includes('收尾中'), true)
+
+  view = await view.rerender(cardProps({ block: settledBlock({ ids: ['a'], result }), catalog }))
+  assert.equal(calls[0].aborted, true, 'settling releases the stream')
+  assert.equal(calls.length, 1, 'settling opens nothing new')
+  const lines = textOf(view.tree)
+  assert.equal(lines.includes(zh.waitTitleSettled), true, 'settled title replaces the running one')
+  assert.equal(lines.includes('收尾中'), true, 'the folded info survives settlement')
+  assert.equal(lines.includes(zh.waitResult), true, 'result label')
+  assert.equal(lines.includes(result), true, 'tool result text is shown verbatim')
+
+  // 目录推送导致的重复渲染也不重开任何一路。
+  await view.rerender(cardProps({ block: settledBlock({ ids: ['a'], result }), catalog: catalogWith([child('a', { label: 'A' })]) }))
+  assert.equal(calls.length, 1, 'no stream is reopened after settlement')
+})
+
+test('卡片：结算后才挂载的历史卡不回放任何流，只显示返回文本', async (t) => {
+  const { mount } = useReactRuntime(t)
+  const { remote, calls } = makeRemote()
+  applyWith({ 'remote.session': remote })
+
+  const result = 'timed out waiting for subagent yyy; it is still running.'
+  const view = await mount(client.__test.WaitSubagentCard, cardProps({
+    block: settledBlock({ ids: ['yyy'], result }),
+    catalog: catalogWith([child('yyy', { label: 'Y' })]),
+  }))
+  assert.equal(calls.length, 0, 'a settled card never opens a stream')
+  const lines = textOf(view.tree)
+  assert.equal(lines.includes('等待结束'), true)
+  assert.equal(lines.includes('Y'), true, 'the id row is still listed')
+  assert.equal(lines.includes(result), true)
+})
+
+test('卡片：参数畸形/名单为空时退回朴素行，且不开任何流', async (t) => {
+  const { mount } = useReactRuntime(t)
+  const { remote, calls } = makeRemote()
+  applyWith({ 'remote.session': remote })
+
+  // 场景一：参数是截断的 JSON（还在流式写入，或调用头被窗口截断）。
+  const broken = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock([], { argsRaw: '{"subagent_id": ["a"' }) }))
+  const brokenLines = textOf(broken.tree)
+  assert.equal(brokenLines.includes('wait_subagent'), true, 'the plain row names the tool')
+  assert.equal(brokenLines.includes('{"subagent_id": ["a"'), true, 'raw args are shown, clamped')
+  assert.equal(calls.length, 0, 'malformed args open no stream')
+  await broken.unmount()
+
+  // 场景二：subagent_id 是空数组（schema 会拒，但历史日志里可能存在）。
+  const empty = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock([]) }))
+  const emptyLines = textOf(empty.tree)
+  assert.equal(emptyLines.includes('wait_subagent'), true)
+  assert.equal(emptyLines.includes('{"subagent_id":[]}'), true)
+  assert.equal(calls.length, 0, 'an empty list opens no stream')
+  await empty.unmount()
+
+  // 场景三：已结算但调用头落在窗口外（call 为 null）——参数拿不到，结果文本仍在。
+  const truncated = await mount(client.__test.WaitSubagentCard, cardProps({ block: settledBlock({ result: 'unknown subagent "z".', truncated: true }) }))
+  const truncatedLines = textOf(truncated.tree)
+  assert.equal(truncatedLines.includes('wait_subagent'), true)
+  assert.equal(truncatedLines.includes('unknown subagent "z".'), true)
+  assert.equal(calls.length, 0)
+})
+
+test('卡片：超过跟随上限的 id 只开 LIMIT 路流，并在卡上说明还有几条未展示', async (t) => {
+  const { mount } = useReactRuntime(t)
+  const { remote, calls } = makeRemote()
+  applyWith({ 'remote.session': remote })
+
+  const ids = Array.from({ length: 10 }, (_, index) => `id-${index}`)
+  const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(ids) }))
+  assert.equal(calls.length, 8, 'the stream fan-out is capped')
+  assert.deepEqual(calls.map((call) => call.request.address.childSessionId), ids.slice(0, 8))
+  const lines = textOf(view.tree)
+  assert.equal(lines.includes('等待 8 个子代理'), true)
+  assert.equal(lines.includes('另有 2 个未展示'), true, 'the cap is stated, not hidden')
+})
+
+test('卡片：某一路 follow 失败只标该 id 读取失败，其余流不受影响', async (t) => {
   const { mount } = useReactRuntime(t)
   const calls = []
   const remote = {
@@ -783,21 +883,21 @@ test('组件：某一路 follow 失败只标该节点读取失败，其余流不
       })()
     },
   }
-  applyWith({ sessions: makeSessions(), 'remote.session': remote })
+  applyWith({ 'remote.session': remote })
 
   const warnings = []
   const original = console.warn
   console.warn = (...args) => { warnings.push(args) }
   try {
-    const view = await mount(client.__test.SubagentTreePanel, panelProps({ tree: twoRunningCatalog() }))
+    const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']) }))
     // follow 同步抛错发生在 effect 里，错误路径的 setState 也要提交一轮才可见。
     await view.flush()
     const lines = textOf(view.tree)
-    assert.equal(lines.includes(zh.treeReadFailed), true, 'failed node shows the read-failed copy')
-    assert.equal(lines.includes(zh.treeLoading), true, 'the other node is still waiting for its first frame')
-    assert.equal(lines.filter((line) => line === zh.treeReadFailed).length, 1, 'failure stays local to that node')
+    assert.equal(lines.includes(zh.treeReadFailed), true, 'failed id shows the read-failed copy')
+    assert.equal(lines.includes(zh.treeLoading), true, 'the other id is still waiting for its first frame')
+    assert.equal(lines.filter((line) => line === zh.treeReadFailed).length, 1, 'failure stays local to that id')
     assert.equal(lines.includes(zh.treeLiveUnavailable), false, 'a failed stream is not an unavailable service')
-    assert.equal(calls.length, 2, 'the other node still has its stream')
+    assert.equal(calls.length, 2, 'the other id still has its stream')
     assert.equal(calls[1].aborted, false)
     assert.equal(warnings.some((args) => String(args[0]).includes('follow a')), true)
   } finally {
@@ -805,98 +905,74 @@ test('组件：某一路 follow 失败只标该节点读取失败，其余流不
   }
 })
 
-test('组件：follow 不可用时 running 行显示实时不可用，留白不冒充"还没有事件"', async (t) => {
+test('卡片：follow 不可用时每行显示实时不可用；已结算的卡不声称实时不可用', async (t) => {
   const { mount } = useReactRuntime(t)
   // 场景一：remote.session 整个缺席（包清单没注入 remotes 半边）。
-  applyWith({ sessions: makeSessions() })
-  const view = await mount(client.__test.SubagentTreePanel, panelProps({ tree: twoRunningCatalog() }))
+  applyWith({})
+  const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']) }))
   const lines = textOf(view.tree)
-  assert.equal(lines.filter((line) => line === zh.treeLiveUnavailable).length, 2, 'each running row states it')
-  assert.equal(lines.includes(zh.treeEmpty), false)
+  assert.equal(lines.filter((line) => line === zh.treeLiveUnavailable).length, 2, 'each row states it')
+  assert.equal(lines.includes(zh.treeLoading), false)
+  await view.unmount()
 
   // 场景二：remote.session 存在但没有 follow（网关拒绝这一路能力）。
   const second = useReactRuntime(t)
-  applyWith({ sessions: makeSessions(), 'remote.session': {} })
-  const noFollow = await second.mount(client.__test.SubagentTreePanel, panelProps({ tree: twoRunningCatalog() }))
+  applyWith({ 'remote.session': {} })
+  const noFollow = await second.mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']) }))
   assert.equal(textOf(noFollow.tree).includes(zh.treeLiveUnavailable), true)
+
+  // 场景三：已结算的卡本来就不订阅，不该说"实时不可用"。
+  const settled = await second.mount(client.__test.WaitSubagentCard, cardProps({ block: settledBlock({ ids: ['a'], result: 'done' }) }))
+  assert.equal(textOf(settled.tree).includes(zh.treeLiveUnavailable), false)
 })
 
-test('组件：展开层的 state 决定该层子节点显示读取失败/加载中，不等根层', async (t) => {
+test('卡片：结算先于第一帧到达时不留下永久「加载中」', async (t) => {
   const { mount } = useReactRuntime(t)
   const { remote } = makeRemote()
-  applyWith({ sessions: makeSessions(), 'remote.session': remote })
+  applyWith({ 'remote.session': remote })
 
-  const tree = {
-    root: {
-      state: 'ready',
-      entries: [{ kind: 'child', id: 'a', activity: 'inactive', hasChildren: true, mode: 'one-shot', label: 'A' }],
-    },
-    a: { state: 'error', entries: [] },
+  let view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']) }))
+  assert.equal(textOf(view.tree).includes(zh.treeLoading), true, 'the running row waits for its first frame')
+
+  // 工具在首帧到达前就结算（对早已完成的子代理是常见路径）：pending 标记还在，但
+  // 已经没有活流会改写它——结算态继续显示"加载中"就是永久谎报。
+  view = await view.rerender(cardProps({ block: settledBlock({ ids: ['a'], result: 'subagent a done' }) }))
+  const lines = textOf(view.tree)
+  assert.equal(lines.includes(zh.treeLoading), false, 'a settled row never keeps the loading copy')
+  assert.equal(lines.includes('subagent a done'), true, 'the result is still rendered')
+})
+
+test('卡片：展示时钟只在有"最后活动"可走动时存在，一个不多', async (t) => {
+  const { mount } = useReactRuntime(t)
+  const created = []
+  const realSetInterval = globalThis.setInterval
+  globalThis.setInterval = (...args) => { created.push(args); return realSetInterval(...args) }
+  const clockCount = () => created.filter(([, delay]) => delay === 1000).length
+  try {
+    const { remote, push } = makeRemote()
+    applyWith({ 'remote.session': remote })
+
+    // 参数畸形的朴素行：没有可走动的时间戳，不建定时器。
+    const fallback = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock([]) }))
+    assert.equal(clockCount(), 0, 'a plain row has nothing to age')
+    await fallback.unmount()
+
+    // 运行中的卡：第一帧之前没有时间戳，不建；帧到达后建一个。
+    const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']) }))
+    assert.equal(clockCount(), 0)
+    await push(0, { type: 'event', event: { type: 'assistant/message', seq: 1, time: Date.now(), data: { message: { content: [{ type: 'text', text: '跑起来了' }] } } } })
+    await view.flush()
+    assert.equal(clockCount(), 1, 'exactly one display clock')
+    await view.unmount()
+  } finally {
+    globalThis.setInterval = realSetInterval
   }
-  let view = await mount(client.__test.SubagentTreePanel, panelProps({ tree }))
-  const toggle = findElement(view.tree, (node) => node.type === 'button' && node.props.title === zh.treeExpand)
-  assert.notEqual(toggle, undefined)
-  toggle.props.onClick()
-  view = await view.rerender(panelProps({ tree: { ...tree, a: { state: 'error', entries: [] } } }))
-  assert.equal(textOf(view.tree).includes(zh.treeLoadFailed), true, 'deep level error is rendered for that level')
-  assert.equal(textOf(view.tree).includes(zh.treeEmpty), false, 'the root is ready, so the empty copy is wrong')
-
-  view = await view.rerender(panelProps({ tree: { ...tree, a: { state: 'loading', entries: [] } } }))
-  assert.equal(textOf(view.tree).includes(zh.treeLoading), true, 'deep level loading is visible too')
 })
 
-test('组件：展开声明按差分，根层只由面板 effect 声明一次', async (t) => {
-  const { mount } = useReactRuntime(t)
-  const { remote } = makeRemote()
-  const calls = []
-  applyWith({ sessions: makeSessions(calls), 'remote.session': remote })
-
-  // a 与 c 都可展开：展开第二个层时不得释放/重声明第一个（差分的记忆必须跨
-  // 依赖变化存活——把释放写回普通 effect 的 cleanup 会让这里重新声明 a）。
-  const catalog = () => twoRunningCatalog({
-    extra: [{ kind: 'child', id: 'c', activity: 'inactive', hasChildren: true, mode: 'one-shot', label: 'C' }],
-  })
-  let view = await mount(client.__test.SubagentTreePanel, panelProps({ tree: catalog() }))
-  // 面板打开即声明根层一次（且只此一次）。
-  assert.deepEqual(calls.filter((call) => call[0] === 'declare'), [['declare', 'root', true]])
-  assert.deepEqual(calls.filter((call) => call[0] === 'refresh'), [['refresh', 'root']])
-
-  // 展开 a：只声明 a 并拉一次 a，不重声明根层、不释放东西。
-  const isToggle = (node) => node.type === 'button' && (node.props.title === zh.treeExpand || node.props.title === zh.treeCollapse)
-  const toggles = findAllElements(view.tree, isToggle)
-  assert.equal(toggles.length, 2, 'a and c render expand toggles')
-  toggles[0].props.onClick()
-  view = await view.rerender(panelProps({ tree: catalog() }))
-  assert.deepEqual(calls.filter((call) => call[0] === 'declare' && call[1] === 'a'), [['declare', 'a', true]])
-  assert.deepEqual(calls.filter((call) => call[0] === 'refresh' && call[1] === 'a'), [['refresh', 'a']])
-  assert.deepEqual(calls.filter((call) => call[2] === false), [], 'expanding releases nothing')
-
-  // 再展开 c：a 必须原样保留（不释放、不重声明、不重拉）。
-  const second = findAllElements(view.tree, isToggle)
-  assert.equal(second.length, 2, 'both rows still expose their toggle')
-  second[1].props.onClick()
-  view = await view.rerender(panelProps({ tree: catalog() }))
-  assert.deepEqual(calls.filter((call) => call[0] === 'declare' && call[1] === 'c'), [['declare', 'c', true]])
-  assert.deepEqual(calls.filter((call) => call[2] === false), [], 'expanding c releases nothing')
-  assert.equal(calls.filter((call) => call[0] === 'declare' && call[1] === 'a').length, 1, 'a is not re-declared')
-  assert.equal(calls.filter((call) => call[0] === 'refresh' && call[1] === 'a').length, 1, 'a is not re-fetched')
-
-  // 目录推送导致的重渲染不重复声明已声明的层。
-  await view.rerender(panelProps({ tree: catalog() }))
-  assert.equal(calls.filter((call) => call[0] === 'declare' && call[1] === 'a').length, 1, 'no duplicate declaration')
-  assert.equal(calls.filter((call) => call[0] === 'declare' && call[1] === 'root').length, 1, 'root declared exactly once')
-
-  // 卸载：收起已声明的展开层，根层的释放也只有一次。
-  await view.unmount()
-  assert.equal(calls.filter((call) => call[0] === 'declare' && call[1] === 'root' && call[2] === false).length, 1)
-  assert.equal(calls.filter((call) => call[0] === 'declare' && call[1] === 'a' && call[2] === false).length, 1)
-  assert.equal(calls.filter((call) => call[0] === 'declare' && call[1] === 'c' && call[2] === false).length, 1)
-})
-
-test('组件：流自然收尾即释放订阅，下一次目录推送重新订阅', async (t) => {
+test('卡片：流干净收尾即从订阅表释放，下一轮目标变化重新订阅', async (t) => {
   const { mount } = useReactRuntime(t)
   const subscribed = []
-  // a 的流立刻自然收尾（子代理结束）；b 的流保持开启（挂住的 promise 不持有
+  // a 的流立刻干净收尾（服务端关掉这一路）；b 的流保持开启（挂住的 promise 不持有
   // 任何定时器，进程仍会退出）。
   const remote = {
     follow: (request) => {
@@ -909,17 +985,82 @@ test('组件：流自然收尾即释放订阅，下一次目录推送重新订�
       })()
     },
   }
-  applyWith({ sessions: makeSessions(), 'remote.session': remote })
+  applyWith({ 'remote.session': remote })
 
-  const view = await mount(client.__test.SubagentTreePanel, panelProps({ tree: twoRunningCatalog() }))
-  assert.deepEqual(subscribed, ['a', 'b'], 'both running nodes opened a stream')
-  // a 已经收尾：只有它那一路被从订阅表里删掉，下一轮目录推送才会重新订阅它。
-  await view.rerender(panelProps({ tree: twoRunningCatalog() }))
-  assert.equal(subscribed.filter((id) => id === 'a').length, 2, 'a is re-subscribed after its stream ended')
-  assert.equal(subscribed.filter((id) => id === 'b').length, 1, 'b keeps its single live stream')
+  const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']) }))
+  assert.deepEqual(subscribed, ['a', 'b'], 'both waited ids opened a stream')
+  await view.flush()
+  const lines = textOf(view.tree)
+  assert.equal(lines.includes('a'), true, 'the row stays after its stream ended')
+  assert.equal(lines.filter((line) => line === zh.treeLoading).length, 1, 'only the still-open stream waits for a frame')
+
+  // 目标清单变化（目录给出了 b 的真实 mode）→ 重跑差分：a 那一路已经被释放，
+  // 因此重新订阅；b 换了 mode 也必须重开。
+  await view.rerender(cardProps({
+    block: runningBlock(['a', 'b']),
+    catalog: catalogWith([child('b', { mode: 'one-shot', label: 'B' })]),
+  }))
+  assert.equal(subscribed.filter((id) => id === 'a').length, 2, 'the released stream is re-subscribed by the next diff')
+  assert.equal(subscribed.filter((id) => id === 'b').length, 2, 'the mode flip re-opens that target')
 })
 
-test('组件：被 abort 的旧流迟到帧不得改写状态（所有权守卫）', async (t) => {
+test('卡片：座位没给 sessionId 时不订阅任何流（契约被破坏也只剩静态行）', async (t) => {
+  const { mount } = useReactRuntime(t)
+  const { remote, calls } = makeRemote()
+  applyWith({ 'remote.session': remote })
+
+  // session 作用域的座位一定给 sessionId；给了异常值也不该退化成"用 undefined
+  // 当父会话 id 去订阅"。
+  const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']), sessionId: null }))
+  assert.equal(calls.length, 0, 'no parent session id, no stream')
+  const lines = textOf(view.tree)
+  assert.equal(lines.includes('等待 1 个子代理'), true)
+  assert.equal(lines.includes('a'), true)
+})
+
+test('卡片：取 follow 属性抛错时只记日志，不开流也不让异常逃出座位', async (t) => {
+  const { mount } = useReactRuntime(t)
+  // 反射代理在没有注入的服务上取属性会抛：座位必须把它折成"实时不可用"，
+  // 而不是让异常逃出 effect（框架的错误边界会摘掉整个座位）。
+  const throwing = { get follow() { throw new Error('inject missing') } }
+  applyWith({ 'remote.session': throwing })
+
+  const warnings = []
+  const original = console.warn
+  console.warn = (...args) => { warnings.push(args) }
+  try {
+    // mount 本身不 reject 就是断言：effect 里的属性访问异常没有逃出去。
+    const view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']) }))
+    const lines = textOf(view.tree)
+    assert.equal(lines.includes(zh.treeLiveUnavailable), true, 'a rejecting property access reads as live-unavailable')
+    assert.equal(warnings.filter((args) => String(args[0]).includes('remote.session')).length >= 1, true, 'the rejected property access is logged')
+  } finally {
+    console.warn = original
+  }
+})
+
+test('卡片：useSessions 抛错时按 id 渲染并记日志，不把异常甩给错误边界', async (t) => {
+  const { mount } = useReactRuntime(t)
+  const { remote } = makeRemote()
+  applyWith({ 'remote.session': remote })
+
+  const warnings = []
+  const original = console.warn
+  console.warn = (...args) => { warnings.push(args) }
+  try {
+    const view = await mount(client.__test.WaitSubagentCard, cardProps({
+      block: runningBlock(['a']),
+      useSessions: () => { throw new Error('store exploded') },
+    }))
+    // 目录不可用只意味着标签/状态查不到：行仍按 id 渲染，信息仍由流驱动。
+    assert.equal(textOf(view.tree).includes('a'), true)
+    assert.equal(warnings.some((args) => String(args[0]).includes('catalog selector')), true)
+  } finally {
+    console.warn = original
+  }
+})
+
+test('卡片：被 abort 的旧流迟到帧不得改写状态（所有权守卫）', async (t) => {
   const { mount } = useReactRuntime(t)
   const late = []
   const remote = {
@@ -928,56 +1069,24 @@ test('组件：被 abort 的旧流迟到帧不得改写状态（所有权守卫�
       return (async function* stream() {
         if (id !== 'a') { await new Promise(() => {}); return }
         yield { type: 'event', event: { type: 'assistant/message', time: 1, data: { message: { content: [{ type: 'text', text: 'FRESH' }] } } } }
-        // 等到被 abort（a 停转）之后，仍然吐一帧迟到内容。
+        // 等到被 abort（工具结算）之后，仍然吐一帧迟到内容。
         await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }))
         late.push('delivered')
         yield { type: 'event', event: { type: 'assistant/message', time: 2, data: { message: { content: [{ type: 'text', text: 'STALE' }] } } } }
       })()
     },
   }
-  applyWith({ sessions: makeSessions(), 'remote.session': remote })
+  applyWith({ 'remote.session': remote })
 
-  let view = await mount(client.__test.SubagentTreePanel, panelProps({ tree: twoRunningCatalog() }))
+  let view = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a', 'b']) }))
   assert.equal(textOf(view.tree).includes('FRESH'), true, 'the live frame lands on the row')
 
-  // a 停转 → 组件 abort 这一路；旧 generator 随后交付的迟到帧必须被丢弃。
-  view = await view.rerender(panelProps({ tree: twoRunningCatalog({ a: 'inactive' }) }))
+  // 工具结算 → 组件 abort 全部流；旧 generator 随后交付的迟到帧必须被丢弃。
+  view = await view.rerender(cardProps({ block: settledBlock({ ids: ['a', 'b'], result: 'done' }) }))
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.equal(late.length, 1, 'the stale frame really was produced after the abort')
   // 必须再提交一轮：没有这一步，守卫失效也不会有任何可见差异，断言等于空转。
   await view.flush()
   assert.equal(textOf(view.tree).includes('STALE'), false, 'ownership guard drops the late frame')
-})
-
-test('座位：useSessions 抛错/缺席时显示目录不可用，不冒充暂无子代理', async (t) => {
-  const { mount } = useReactRuntime(t)
-  applyWith({})
-
-  const warnings = []
-  const original = console.warn
-  console.warn = (...args) => { warnings.push(args) }
-  try {
-    const throwing = { sessionId: 'root', useSessions: () => { throw new Error('store exploded') }, t: (key) => zh[key] ?? key }
-    let view = await mount(client.__test.SubagentTreeSeat, throwing)
-    assert.equal(textOf(view.tree).includes(zh.treeButton), true, 'the button still renders')
-
-    const button = findElement(view.tree, (node) => node.type === 'button' && node.props.title === zh.treeTitle)
-    assert.notEqual(button, undefined)
-    button.props.onClick()
-    view = await view.rerender(throwing)
-    const lines = textOf(view.tree)
-    assert.equal(lines.includes(zh.treeCatalogUnavailable), true)
-    assert.equal(lines.includes(zh.treeEmpty), false, 'unavailable catalog must not read as empty')
-    assert.equal(warnings.length >= 1, true, 'the selector failure is logged')
-  } finally {
-    console.warn = original
-  }
-
-  // props.useSessions 缺席同样算目录不可用，且不抛。
-  const seatProps = { sessionId: 'root', t: (key) => zh[key] ?? key }
-  const view = await mount(client.__test.SubagentTreeSeat, seatProps)
-  const open = findElement(view.tree, (node) => node.type === 'button' && node.props.title === zh.treeTitle)
-  open.props.onClick()
-  await view.rerender(seatProps)
-  assert.equal(textOf(view.tree).includes(zh.treeCatalogUnavailable), true)
+  assert.equal(textOf(view.tree).includes('FRESH'), true, 'the folded info from before settlement stays')
 })
