@@ -551,6 +551,16 @@ window.__ModuleLoader__.load({
 		 * 功能不丢，只是少了通用行外壳。
 		 */
 		function WaitSubagentCard(props) {
+			const text = translator(props?.t);
+			const block = props?.block;
+			const settled = block !== null && typeof block === 'object' && block.kind === 'tool-result';
+			// 折叠摘要只用两种说法：等待 N 个子代理 / 已结束。通用行对"参数里没有可读
+			// 摘要键"的工具会把参数 JSON 当摘要（`wait_subagent` 正好是这种），而 Web
+			// 客户端不消费 host 的 presentCall，所以只能由接管展开体的这一侧给摘要。
+			const waited = waitedIds(settled ? block.call?.argsRaw : block?.argsRaw);
+			const summary = waited.ids.length === 0
+				? undefined
+				: settled ? text('treeInactive') : text('waitTitleRunning', { n: waited.ids.length });
 			const generic = uiToolModule !== null && typeof uiToolModule === 'object' && typeof uiToolModule.GenericToolCard === 'function'
 				? uiToolModule.GenericToolCard
 				: undefined;
@@ -560,7 +570,7 @@ window.__ModuleLoader__.load({
 				block: props?.block,
 				sessionId: props?.sessionId,
 				useSessions: props?.useSessions,
-				text: translator(props?.t),
+				text,
 				standalone,
 			});
 			if (standalone) return body;
@@ -574,6 +584,7 @@ window.__ModuleLoader__.load({
 				loadImage: props?.loadImage,
 				inspect: props?.inspect,
 				t: conversationText,
+				summary,
 				bodyContent: body,
 			});
 		}

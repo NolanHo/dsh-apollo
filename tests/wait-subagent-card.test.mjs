@@ -58,6 +58,7 @@ function genericToolCardStub(props) {
     'data-generic-tool-card': props.toolName,
     'data-generic-body': props.bodyContent !== undefined,
     'data-generic-t': typeof props.t,
+    'data-generic-summary': props.summary,
   })
 }
 const uiToolStub = { GenericToolCard: genericToolCardStub }
@@ -750,6 +751,7 @@ test('卡片：折叠行交给 harness 的通用行——展开体作为 bodyCon
   assert.equal(row.props['data-generic-tool-card'], 'wait_subagent', 'the row keeps the wire tool name')
   assert.equal(row.props['data-generic-body'], true, 'the live body travels as bodyContent')
   assert.equal(row.props['data-generic-t'], 'function', 'the conversation translator rides along for the row labels')
+  assert.equal(row.props['data-generic-summary'], '等待 2 个子代理', 'the collapsed summary is ours, never the argument JSON')
   // 展开体只在通用行展开时才挂载（ToolRow 的 {open && children}），所以这里尚未开流。
   assert.equal(calls.length, 0, 'nothing subscribes until the harness expands the row')
 })
