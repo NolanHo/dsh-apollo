@@ -163,13 +163,10 @@ window.__ModuleLoader__.load({
 			body: { display: 'flex', flexDirection: 'column', gap: '6px' },
 			// standalone 降级时的一行摘要（正常路径下摘要由通用行的折叠行提供）。
 			standaloneHead: { fontWeight: 600 },
-			waitRow: { display: 'flex', flexDirection: 'column', gap: '2px' },
-			waitRowHead: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 },
-			waitLabel: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '260px' },
-			waitMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px', whiteSpace: 'nowrap' },
-			dotRunning: { color: 'var(--dsw-alias-state-success-primary, #3c3)', fontSize: '10px' },
-			dotIdle: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '10px' },
-			waitDetail: { color: 'var(--dsw-alias-label-secondary, #aaa)', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingLeft: '18px' },
+			// 与通用工具的正文同款排版：13px 继承、次级色；细节行再降一档、缩进对齐。
+			waitLine: { display: 'flex', flexDirection: 'column', gap: '2px' },
+			waitLineHead: { color: 'var(--dsw-alias-label-secondary, #aaa)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+			waitLineDetail: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingLeft: '12px' },
 			fallbackArgs: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px', color: 'var(--dsw-alias-label-secondary, #aaa)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
 			resultBox: { display: 'flex', flexDirection: 'column', gap: '2px', paddingTop: '6px', borderTop: '1px solid var(--dsw-alias-border-l2, #555)' },
 			resultLabel: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: '12px' },
@@ -769,14 +766,19 @@ window.__ModuleLoader__.load({
 				if (detail === null) detail = '';
 				const age = feed?.lastTime === undefined ? undefined : formatAge(now - feed.lastTime);
 				const ageKey = age?.unit === 'hours' ? 'treeAgeHours' : age?.unit === 'minutes' ? 'treeAgeMinutes' : 'treeAgeSeconds';
-				return h('div', { key: id, style: styles.waitRow },
-					h('div', { style: styles.waitRowHead },
-						h('span', { style: activity === 'running' ? styles.dotRunning : styles.dotIdle }, '●'),
-						h('span', { style: styles.waitLabel, title: id }, label),
-						activity === undefined ? null : h('span', { style: styles.waitMeta }, text(activity === 'running' ? 'treeRunning' : 'treeInactive')),
-						age === undefined ? null : h('span', { style: styles.waitMeta }, `${text('treeLastActive')} ${text(ageKey, { n: age.value })}`)),
-					detail === '' ? null : h('div', { style: styles.waitDetail }, detail));
+				// 与通用工具行的正文同一套排版：纯文本行，不引入第二套视觉（圆点/主色
+				// 标签/分栏），免得一条自造控件夹在标准"输入/输出"卡片上方。
+				const meta = [];
+				if (activity !== undefined) meta.push(text(activity === 'running' ? 'treeRunning' : 'treeInactive'));
+				if (age !== undefined) meta.push(`${text('treeLastActive')} ${text(ageKey, { n: age.value })}`);
+				return h('div', { key: id, style: styles.waitLine },
+					h('div', { style: styles.waitLineHead, title: id }, meta.length === 0 ? label : `${label} · ${meta.join(' · ')}`),
+					detail === '' ? null : h('div', { style: styles.waitLineDetail }, detail));
 			};
+
+			// 工具已结束：展开体留空，展开后就是标准的「输出」卡片（和其它工具结算后
+			// 一模一样）。实时行只在等待中才有信息量。
+			if (settled && props?.standalone !== true) return null;
 
 			const children = [];
 			// standalone 降级（没有通用行外壳）时补一行摘要，替代工具行的折叠摘要。

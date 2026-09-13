@@ -794,8 +794,8 @@ test('卡片：运行中为每个 id 开一路流（mode 取目录，查不到�
   assert.equal(calls.every((call) => call.signal.aborted === false), true)
 
   const initial = textOf(view.tree)
-  assert.equal(initial.includes('A'), true, 'label comes from the catalog')
-  assert.equal(initial.includes('b'), true, 'a diagnostic entry is not a row, so the id stands in for it')
+  assert.equal(initial.join('\n').includes('A'), true, 'label comes from the catalog')
+  assert.equal(initial.join('\n').includes('b'), true, 'a diagnostic entry is not a row, so the id stands in for it')
   assert.equal(initial.filter((line) => line === zh.treeLoading).length, 2, 'both rows wait for their first frame')
 
   // 帧到达 → 该 id 的最后工具/最后一行落到该行，时间走起来。
@@ -817,7 +817,7 @@ test('卡片：运行中为每个 id 开一路流（mode 取目录，查不到�
   const lines = textOf(view.tree)
   assert.equal(lines.includes(`${zh.treeLastTool} rg · 正在读 spec`), true, 'folded tool + last line')
   assert.equal(lines.includes(`${zh.treeLastTool} ls · 开场快照`), true, 'an opening snapshot folds like live frames')
-  assert.equal(lines.filter((line) => AGE_LINE.test(line)).length, 2, 'last-active age is rendered per row')
+  assert.equal((lines.join('\n').match(/最后活动 \d+ (秒|分钟|小时)前/g) ?? []).length, 2, 'last-active age is rendered per row')
   assert.equal(lines.includes(zh.treeLoading), false, 'both rows left their loading state')
 
   // 卸载：所有活流 abort。
@@ -834,9 +834,10 @@ test('卡片：状态只认目录快照，快照里没有这个 id 就不声称�
   const catalog = catalogWith([child('a', { label: 'A' }), child('b', { activity: 'inactive', label: 'B' })])
   const view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a', 'b']), catalog }))
   const lines = textOf(view.tree)
-  assert.equal(lines.includes('A'), true)
-  assert.equal(lines.filter((line) => line === zh.treeRunning).length, 1, 'the catalog-running row claims running')
-  assert.equal(lines.filter((line) => line === zh.treeInactive).length, 1, 'the snapshot wins over the open stream')
+  const joinedFirst = lines.join('\n')
+  assert.equal(joinedFirst.includes('A'), true)
+  assert.equal((joinedFirst.match(new RegExp(zh.treeRunning, 'g')) ?? []).length, 1, 'the catalog-running row claims running')
+  assert.equal((joinedFirst.match(new RegExp(zh.treeInactive, 'g')) ?? []).length, 1, 'the snapshot wins over the open stream')
   assert.equal(lines.some((line) => line.startsWith(zh.treeLastTool)), false, 'nothing folded yet')
   await view.unmount()
 
@@ -847,8 +848,9 @@ test('卡片：状态只认目录快照，快照里没有这个 id 就不声称�
   }))
   const unknownLines = textOf(unknown.tree)
   assert.equal(unknownLines.includes('b'), true, 'the id still renders')
-  assert.equal(unknownLines.filter((line) => line === zh.treeRunning).length, 0, 'an open stream is not evidence that the child is running')
-  assert.equal(unknownLines.filter((line) => line === zh.treeInactive).length, 1, 'only the id the catalog knows about claims a status')
+  const joined = unknownLines.join('\n')
+  assert.equal(joined.includes(zh.treeRunning), false, 'an open stream is not evidence that the child is running')
+  assert.equal(joined.includes(zh.treeInactive), true, 'the id the catalog knows about claims its status')
   assert.equal(unknownLines.includes(zh.treeLoading), true, "the unknown id's stream is still waiting for its first frame")
 })
 
@@ -868,7 +870,7 @@ test('卡片：工具结算即 abort 全部流、保留结束前的信息、显�
   assert.equal(calls[0].aborted, true, 'settling releases the stream')
   assert.equal(calls.length, 1, 'settling opens nothing new')
   const lines = textOf(view.tree)
-  assert.equal(lines.includes('收尾中'), true, 'the folded info survives settlement')
+  assert.equal(lines.join('\n').includes('收尾中'), false, 'settling hands the body back to the standard Output card')
 
   // 目录推送导致的重复渲染也不重开任何一路。
   await view.rerender(cardProps({ block: settledBlock({ ids: ['a'], result }), catalog: catalogWith([child('a', { label: 'A' })]) }))
@@ -887,7 +889,7 @@ test('卡片：结算后才挂载的历史卡不回放任何流，只显示返�
   }))
   assert.equal(calls.length, 0, 'a settled card never opens a stream')
   const lines = textOf(view.tree)
-  assert.equal(lines.includes('Y'), true, 'the id row is still listed')
+  assert.equal(lines.join('\n').includes('Y'), false, 'a settled card renders no live body at all')
 })
 
 test('卡片：参数畸形/名单为空时退回朴素行，且不开任何流', async (t) => {
@@ -1146,12 +1148,13 @@ test('卡片：被 abort 的旧流迟到帧不得改写状态（所有权守卫�
   let view = await mountCardOpen(mount, cardProps({ block: runningBlock(['a', 'b']) }))
   assert.equal(textOf(view.tree).includes('FRESH'), true, 'the live frame lands on the row')
 
-  // 工具结算 → 组件 abort 全部流；旧 generator 随后交付的迟到帧必须被丢弃。
-  view = await view.rerender(cardProps({ block: settledBlock({ ids: ['a', 'b'], result: 'done' }) }))
+  // 目录把 a 的 mode 翻成 continuable → 目标 key 变化，组件 abort 旧的这一路；
+  // 旧 generator 随后交付的迟到帧必须被丢弃（子会话 id 不变，守卫失效就会串味）。
+  view = await view.rerender(cardProps({ block: runningBlock(['a', 'b']), catalog: catalogWith([child('a', { mode: 'one-shot' }), child('b')]) }))
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.equal(late.length, 1, 'the stale frame really was produced after the abort')
   // 必须再提交一轮：没有这一步，守卫失效也不会有任何可见差异，断言等于空转。
   await view.flush()
   assert.equal(textOf(view.tree).includes('STALE'), false, 'ownership guard drops the late frame')
-  assert.equal(textOf(view.tree).includes('FRESH'), true, 'the folded info from before settlement stays')
+  assert.equal(textOf(view.tree).includes('FRESH'), true, 'the surviving stream keeps its folded info')
 })
