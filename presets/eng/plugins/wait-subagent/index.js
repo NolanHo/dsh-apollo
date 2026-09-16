@@ -4,9 +4,20 @@
  * Preset-local plugin for the eng preset (resolved relative to this preset's
  * directory). Continuable subagents live in the `subagents` registry, not the
  * `jobs` registry, so the only settlement signal is the scoped `subagent/end`
- * event. The tool takes an ARRAY of durable child ids (`subagent_id`), awaits
- * them all concurrently (duplicates deduped, order preserved), and returns one
- * SHORT line per id (done + stopReason).
+ * event. The tool takes an ARRAY of durable child ids (`subagent_id`) and
+ * watches them concurrently (duplicates deduped, order preserved): it returns
+ * as soon as ANY watched id settles — first completion, not a barrier —
+ * reporting every child that is done by then as one SHORT line per id (done +
+ * stopReason) and naming the ids still running, which the caller passes to
+ * another call to wait for the next one. A barrier made the slowest child of
+ * the batch decide the wall clock (long-tail tax); first-completion matches how
+ * asynchronous scheduling wants to be driven — collect what is ready, re-arm on
+ * the rest.
+ *
+ * The wait is bounded: one shared window over the whole batch (one timer,
+ * armed when the batch arms), capped at MAX_WAIT_MS. "Wait forever" is not a
+ * scheduling primitive — the caller always gets a result it can act on, either
+ * done lines or the ids still running plus a re-call hint.
  *
  * The children's content is none of this tool's business: the subagent manager
  * unconditionally delivers a settlement notice to the parent BEFORE
@@ -23,18 +34,16 @@
  * Mid-run messages the child sends (`send_message`, source kind
  * `agent-message`) likewise stay in place.
  *
- * `timeout_ms` is ONE shared window over the whole batch (all timers start at
- * the same instant), matching the semantics same-message parallel calls had.
  * An id that is not a direct child fails the whole call fast — nobody is
  * waited for — keeping the contract the single-id version had. A child
  * dispatched moments ago may not have started its first turn yet: its status
  * is not `running` and no settlement exists. Returning early with a "not
  * running" note there (the pre-grace behavior) ended the turn before the
  * child even started and forced a re-wait on the next turn — session audit
- * 2f5dd618. Instead, a not-yet-started child gets a startup grace window
- * (START_GRACE_MS): the tool keeps waiting while the child spins up,
- * settles, the optional timeout elapses, or the grace expires without the
- * child ever starting (only then a retryable informational line).
+ * 2f5dd618. Instead, not-yet-started children get a startup grace window
+ * (START_GRACE_MS) watched by one batch-wide poller: the call keeps waiting
+ * while a child spins up, settles, or until the grace expires for every child
+ * that never started (only then a retryable informational line).
  *
  * Zero imports on purpose: the module loads from the preset directory, where
  * Node's upward node_modules walk never reaches the harness install, so bare
@@ -48,13 +57,16 @@ export const inject = ['tools', 'subagents', 'agents']
 /** Grace window for a just-dispatched child that has not started running yet. */
 const START_GRACE_MS = 30_000
 
-/** Status polling interval while waiting for a not-yet-started child. */
+/** Status polling interval while waiting for not-yet-started children. */
 const POLL_MS = 250
+
+/** Hard ceiling for one call's wait window, whatever `timeout_ms` asks for. */
+const MAX_WAIT_MS = 600_000
 
 export function apply(ctx) {
   /** childId -> { time, info } — latest settlement observed since mount. */
   const settled = new Map()
-  /** childId -> finish(info) callbacks awaiting settlement. */
+  /** childId -> callbacks awaiting settlement; each is called at most once. */
   const waiters = new Map()
 
   ctx.on('subagent/end', (info) => {
@@ -64,13 +76,13 @@ export function apply(ctx) {
     const list = waiters.get(id)
     if (list !== undefined) {
       waiters.delete(id)
-      for (const finish of [...list]) finish({ kind: 'settled', info })
+      for (const onSettle of [...list]) onSettle(info)
     }
   })
 
   ctx.tools.register({
     name: 'wait_subagent',
-    description: 'Wait for one or more background continuable subagents (spawned by subagent or subagent_fork) to finish their current turn. Pass their durable ids as an array in subagent_id — all are awaited concurrently and the result carries one short line per id (done + stop reason); a child\'s closing message arrives as the framework settlement notice immediately after this result; do not expect it here. Blocks until every listed child settles, the optional timeout_ms elapses (one shared window over all ids), or the user interrupts — without timeout_ms, until completion. A just-dispatched child that has not started yet is awaited through a brief startup grace rather than reported as not running. Use it when your next step depends on those results; with independent work remaining, prefer background plus completion notices. Do not pass bash job ids — those use job_output.',
+    description: 'Wait for one or more background continuable subagents (spawned by subagent or subagent_fork) to finish their current turn. Pass their durable ids as an array in subagent_id — they are watched concurrently and the call returns as soon as ANY of them settles: the result carries one short line per finished child (done + stop reason) and names the ids still running, so pass those remaining ids to another wait_subagent call to wait for the next one; children that settle together are reported together, and a child\'s closing message arrives as the framework settlement notice immediately after the result that reports it — do not expect it here. One call waits at most 600000ms (pass a smaller timeout_ms to shorten the one shared window over the whole batch); on expiry the result lists the children still running — call wait_subagent again to keep waiting. A just-dispatched child that has not started yet is awaited through a brief startup grace rather than reported as not running. Use it when your next step depends on those results; with independent work remaining, prefer background plus completion notices. Do not pass bash job ids — those use job_output.',
     parameters: {
       type: 'object',
       properties: {
@@ -78,11 +90,11 @@ export function apply(ctx) {
           type: 'array',
           items: { type: 'string' },
           minItems: 1,
-          description: 'One or more durable subagent ids returned by the subagent or subagent_fork tool call; every id is awaited concurrently.',
+          description: 'One or more durable subagent ids returned by the subagent or subagent_fork tool call; every id is watched concurrently and the first settlement ends the call.',
         },
         timeout_ms: {
           type: 'integer',
-          description: 'Optional maximum wait in milliseconds applied as one shared window over all ids; omit to wait until every child settles. On expiry the tool returns while some children are still running.',
+          description: 'Optional maximum wait in milliseconds for this call, capped at 600000; omit to use the 600000 ceiling. One shared window over the whole batch: on expiry the tool returns while some children are still running.',
         },
       },
       required: ['subagent_id'],
@@ -123,105 +135,192 @@ export function apply(ctx) {
       const doneLine = (id, info) => `subagent ${id} done (${info && info.stopReason ? info.stopReason : 'completed'}); its closing message follows as the settlement notice.`
 
       const startedAt = Date.now()
-      const capMs = typeof args.timeout_ms === 'number' && args.timeout_ms > 0 ? args.timeout_ms : undefined
+      // The window is always bounded: an explicit timeout_ms only ever shortens
+      // it past the clamp (0/<0/non-number is treated as "not passed", the
+      // parsing habit the previous version had).
+      const capMs = typeof args.timeout_ms === 'number' && args.timeout_ms > 0
+        ? Math.min(args.timeout_ms, MAX_WAIT_MS)
+        : MAX_WAIT_MS
 
       /**
-       * Wait for one child. Resolves with {kind:'settled',info} |
-       * {kind:'timedOut'} | {kind:'aborted'} | {kind:'notStarted'}. The
-       * per-id machinery (settled fast path, waiter registration, timeout
-       * timer, startup-grace poller) is the single-id logic of old,
-       * unchanged; Promise.all over ids gives the concurrent batch.
+       * Watch the whole batch on one shared window. Resolves on the FIRST of:
+       * an id settles (first-completion), every id reaches a terminal state
+       * without a settlement, the window expires, or the call is aborted.
+       * `outcomes` holds the per-id classification; an id missing from it was
+       * still running when the call returned early — usually a same-tick
+       * sibling, absorbed from the plugin-level `settled` map right after.
        */
-      const waitOne = (id) => {
-        // Fast path: the child is not running and a settlement is already on
-        // record — resolve immediately (the notice was already delivered when
-        // the child settled, so it is in the conversation history).
-        if (statusOf(id) !== 'running') {
-          const hit = settled.get(id)
-          if (hit !== undefined) return Promise.resolve({ kind: 'settled', info: hit.info })
+      const waitBatch = () => new Promise((resolve) => {
+        const outcomes = new Map()
+        const pending = new Set(ids)
+        /** id -> the callback handed to the plugin-level `waiters` list. */
+        const registered = new Map()
+        let finished = false
+        let timer
+        let poller
+
+        const onAbort = () => {
+          if (finished) return
+          for (const id of pending) outcomes.set(id, { kind: 'aborted' })
+          pending.clear()
+          complete('aborted')
         }
 
-        return new Promise((resolve) => {
-          let done = false
-          let timer
-          let poller
-          const finish = (value) => {
-            if (done) return
-            done = true
-            if (poller !== undefined) clearInterval(poller)
+        /** Detach from every shared structure this call hooked into. */
+        const release = () => {
+          if (timer !== undefined) clearTimeout(timer)
+          if (poller !== undefined) clearInterval(poller)
+          if (exec.signal !== undefined) exec.signal.removeEventListener('abort', onAbort)
+          for (const [id, onSettle] of registered) {
             const list = waiters.get(id)
-            if (list !== undefined) {
-              const index = list.indexOf(finish)
-              if (index >= 0) list.splice(index, 1)
-              if (list.length === 0) waiters.delete(id)
-            }
-            if (timer !== undefined) clearTimeout(timer)
-            if (exec.signal !== undefined) exec.signal.removeEventListener('abort', onAbort)
-            resolve(value)
+            if (list === undefined) continue
+            const index = list.indexOf(onSettle)
+            if (index >= 0) list.splice(index, 1)
+            if (list.length === 0) waiters.delete(id)
           }
-          const onAbort = () => finish({ kind: 'aborted' })
+          registered.clear()
+        }
 
-          const list = waiters.get(id) ?? []
-          list.push(finish)
-          waiters.set(id, list)
-          // All ids share startedAt, so one capMs value is one shared window.
-          if (capMs !== undefined) timer = setTimeout(() => finish({ kind: 'timedOut' }), capMs)
-          if (exec.signal !== undefined) {
-            if (exec.signal.aborted) {
-              finish({ kind: 'aborted' })
-              return
-            }
-            exec.signal.addEventListener('abort', onAbort, { once: true })
-          }
+        const complete = (reason) => {
+          if (finished) return
+          finished = true
+          release()
+          resolve({ reason, outcomes })
+        }
 
-          // Startup grace: a freshly dispatched child sits between spawn and
-          // its first turn (status not `running`, no settlement yet). Keep the
-          // wait alive while it spins up; once `running`, only `subagent/end`
-          // (the listener above) resolves us. If the grace expires without the
-          // child ever starting or settling, fall back to a retryable note
-          // instead of the old misleading "is not running" early return.
-          poller = setInterval(() => {
-            if (done) return
-            const hit = settled.get(id)
-            if (hit !== undefined) {
-              finish({ kind: 'settled', info: hit.info })
-              return
-            }
-            if (statusOf(id) !== 'running' && Date.now() - startedAt >= START_GRACE_MS) {
-              finish({ kind: 'notStarted' })
-            }
-          }, POLL_MS)
+        const record = (id, outcome) => {
+          if (finished || !pending.has(id)) return
+          pending.delete(id)
+          outcomes.set(id, outcome)
+          // First-completion: one settled id ends the call. Siblings that
+          // settle in the same tick are picked up at assembly time, so a batch
+          // that finishes together is reported together.
+          if (outcome.kind === 'settled') complete('settled')
+          else if (pending.size === 0) complete('none')
+        }
 
-          // Re-check: the child may have settled between the fast path above
-          // and waiter registration. Only a settlement AFTER this wait started
-          // counts as a live result.
+        // Fast path: the child is not running and a settlement is already on
+        // record — nobody to wait for, and (first-completion) that settlement
+        // ends the call just like a live one.
+        let preSettled = false
+        for (const id of ids) {
+          if (statusOf(id) === 'running') continue
           const hit = settled.get(id)
-          if (hit !== undefined && hit.time >= startedAt) finish({ kind: 'settled', info: hit.info })
-        })
+          if (hit === undefined) continue
+          preSettled = true
+          pending.delete(id)
+          outcomes.set(id, { kind: 'settled', info: hit.info })
+        }
+        if (preSettled) return complete('settled')
+
+        for (const id of pending) {
+          const onSettle = (info) => record(id, { kind: 'settled', info })
+          registered.set(id, onSettle)
+          const list = waiters.get(id) ?? []
+          list.push(onSettle)
+          waiters.set(id, list)
+        }
+
+        if (exec.signal !== undefined) {
+          if (exec.signal.aborted) {
+            onAbort()
+            return
+          }
+          exec.signal.addEventListener('abort', onAbort, { once: true })
+        }
+
+        // All ids share startedAt, so one capMs value is one shared window.
+        timer = setTimeout(() => {
+          if (finished) return
+          for (const id of pending) outcomes.set(id, { kind: 'timedOut' })
+          pending.clear()
+          complete('timedOut')
+        }, capMs)
+
+        // Startup grace, batched into one poller over every pending id: a
+        // freshly dispatched child sits between spawn and its first turn
+        // (status not `running`, no settlement yet). Keep the wait alive while
+        // it spins up; once `running`, only `subagent/end` resolves it. An id
+        // that never starts within the grace is recorded as retryable, and the
+        // batch returns only once no id can progress any more.
+        poller = setInterval(() => {
+          if (finished) return
+          const now = Date.now()
+          for (const id of [...pending]) {
+            const hit = settled.get(id)
+            if (hit !== undefined && hit.time >= startedAt) {
+              record(id, { kind: 'settled', info: hit.info })
+              continue
+            }
+            if (statusOf(id) !== 'running' && now - startedAt >= START_GRACE_MS) {
+              record(id, { kind: 'notStarted' })
+            }
+          }
+        }, POLL_MS)
+
+        // Race backstop: a child may have settled between the fast path above
+        // and waiter registration. Only a settlement AFTER this wait started
+        // counts as a live result.
+        for (const id of [...pending]) {
+          const hit = settled.get(id)
+          if (hit !== undefined && hit.time >= startedAt) record(id, { kind: 'settled', info: hit.info })
+        }
+      })
+
+      const result = await waitBatch()
+
+      // Absorb same-tick siblings: settlements that landed after the gate
+      // resolved but before this continuation ran are already on record, and
+      // reporting them here spares the caller a no-op second call.
+      for (const id of ids) {
+        if (result.outcomes.has(id)) continue
+        const hit = settled.get(id)
+        if (hit !== undefined && hit.time >= startedAt) result.outcomes.set(id, { kind: 'settled', info: hit.info })
       }
 
-      const outcomes = await Promise.all(ids.map((id) => waitOne(id)))
+      const outcomes = ids.map((id) => result.outcomes.get(id) ?? { kind: 'stillRunning' })
 
       // Every waiter shares one abort signal, so an interruption either
       // aborts the whole batch or lands after some children already settled.
       // Collapse the all-aborted case into one line; mixed cases keep
       // per-id lines so the settled ones are not lost.
-      if (outcomes.length > 0 && outcomes.every((outcome) => outcome.kind === 'aborted')) {
+      if (outcomes.every((outcome) => outcome.kind === 'aborted')) {
         return `wait for ${ids.length} subagent${ids.length === 1 ? '' : 's'} was aborted by user interruption; the children may still be running.`
       }
 
-      const lines = outcomes.map((outcome, index) => {
+      const lines = []
+      const stillRunning = []
+      outcomes.forEach((outcome, index) => {
         const id = ids[index]
-        if (outcome.kind === 'aborted') return `wait for subagent ${id} was aborted by user interruption; the child may still be running.`
-        if (outcome.kind === 'timedOut') return `timed out waiting for subagent ${id}; it is still running. You will be notified when it finishes — you can wait_subagent it again or continue with other work.`
-        if (outcome.kind === 'notStarted') {
-          return `subagent ${id} has not started after ${Math.round(START_GRACE_MS / 1000)}s (status: ${statusOf(id)}). It may still be spinning up — call wait_subagent again, or continue with other work; you will be notified when it finishes.`
+        if (outcome.kind === 'stillRunning') {
+          stillRunning.push(id)
+          return
         }
-        // Real settlement: short done line; the framework's settlement notice
-        // (already delivered to the parent inbox before `subagent/end`)
-        // carries the closing message — nothing to consume or deduplicate.
-        return doneLine(id, outcome.info)
+        if (outcome.kind === 'settled') {
+          // Real settlement: short done line; the framework's settlement notice
+          // (already delivered to the parent inbox before `subagent/end`)
+          // carries the closing message — nothing to consume or deduplicate.
+          lines.push(doneLine(id, outcome.info))
+          return
+        }
+        if (outcome.kind === 'timedOut') {
+          lines.push(`timed out waiting for subagent ${id}; it is still running. You will be notified when it finishes — you can wait_subagent it again or continue with other work.`)
+          return
+        }
+        if (outcome.kind === 'aborted') {
+          lines.push(`wait for subagent ${id} was aborted by user interruption; the child may still be running.`)
+          return
+        }
+        lines.push(`subagent ${id} has not started after ${Math.round(START_GRACE_MS / 1000)}s (status: ${statusOf(id)}). It may still be spinning up — call wait_subagent again, or continue with other work; you will be notified when it finishes.`)
       })
+
+      // Only a first-completion return ('settled') can leave ids running: the
+      // timeout line and the not-started line already carry their own re-call
+      // guidance, so the summary line belongs to this case alone. ('none' /
+      // 'timedOut' / 'aborted' always classify every id.)
+      if (stillRunning.length > 0 && result.reason === 'settled') {
+        lines.push(`still running: ${stillRunning.join(', ')} — call wait_subagent again with them to wait for the next one; you will also be notified when each finishes.`)
+      }
       return lines.join('\n')
     },
   })

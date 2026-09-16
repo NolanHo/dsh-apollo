@@ -75,7 +75,7 @@ rm -rf ~/.dsh/.agent-presets/eng
 | `agent.cordis.yml` | preset 组合（改编自 DSH 内置 standard preset，MIT，见 `presets/eng/NOTICE`）：工具、委派、plan mode、压缩与提示词段 |
 | `preset.yml` | 预设元数据（名称「工程模式」） |
 | `plugins/exit-guard/` | 退出守卫：`agent/turn-stopping` 时若有运行中的直接子代理或后台任务，注入提醒强制回合继续 |
-| `plugins/wait-subagent/` | `wait_subagent` 工具：一次调用并发等待全部直接子代理，只回短 done 行，内容交还框架的 settlement notice |
+| `plugins/wait-subagent/` | `wait_subagent` 工具：一次调用并发盯住多个直接子代理，任一结算即返回短 done 行并列出仍在跑的 id（单次最长等 10 分钟），内容交还框架的 settlement notice |
 | `plugins/mode-instructions/` | eng 专属提示词段：退出守卫契约 + 子代理委派/编排纪律（只写其它表面未述的 delta；委派纪律原在全局 `~/.dsh/AGENTS.md`，2026-09-11 迁入；模型档位留在全局，因其跟随本机路由配置） |
 | `plugins/lib/atlas-config.js` | `<dshHome>/eng.json` 读取（旧名 `atlas.json` 只读回退） |
 
@@ -170,7 +170,7 @@ rm -rf ~/.dsh/.agent-presets/eng
 ## 开发
 
 ```sh
-node --test          # 115 例：技能 provider、捆绑技能目录、预设同步、预设漂移自检、配置读取、退出守卫、wait_subagent、面板路由、工具卡（座位与词典契约、wait_subagent 参数解析、派发参数/摘要/子会话 id 解析、折叠/时长纯函数、follow 请求形状、流订阅差分与所有权、两个卡的组件级渲染与生命周期）
+node --test          # 122 例：技能 provider、捆绑技能目录、预设同步、预设漂移自检、配置读取、退出守卫、wait_subagent、面板路由、工具卡（座位与词典契约、wait_subagent 参数解析、派发参数/摘要/子会话 id 解析、折叠/时长纯函数、follow 请求形状、流订阅差分与所有权、两个卡的组件级渲染与生命周期）
 ```
 
 `presets/eng/` 是仓库内的唯一事实源，`<dshHome>/.agent-presets/eng` 是启动时同步出来的副本——**不要直接编辑副本**，下次启动会被覆盖。跑 `node --test` 会顺带把源树同步进副本（漂移自检的一部分），所以改完预设先跑测试再重启。

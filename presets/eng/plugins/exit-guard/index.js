@@ -57,8 +57,9 @@ function buildMessage(children, jobs) {
     '⚠️ 以下后台工作仍在运行，回合不能结束：',
     ...lines,
     '',
-    '请先用 wait_subagent 等待运行中的子代理（需要续用其对话用 send_message）、'
-      + '用 job_output 收取后台命令的结果；确属不需要的用 job_kill 停止，全部处理完毕后再收尾。',
+    '请先用 wait_subagent 收取运行中的子代理（任一完成即返回；收齐多个可能需要多次调用，'
+      + '需要续用其对话用 send_message）、用 job_output 收取后台命令的结果；'
+      + '确属不需要的用 job_kill 停止，全部处理完毕后再收尾。',
   ].join('\n')
   return {
     role: 'user',

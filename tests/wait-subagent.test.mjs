@@ -1,7 +1,8 @@
 /**
  * wait-subagent 单元测试：数组入参契约、正常等待、已完成快路径、刚派发未启动
- * 的宽限等待、宽限超时、用户超时、错误收场、非直接子代理 fail-fast、多 id
- * 并发、混合收场、去重、不动父代理 inbox。
+ * 的宽限等待、宽限超时、用户超时、错误收场、非直接子代理 fail-fast、单 id 等待、
+ * 多 id first-completion（任一结算即返回 + still running 指引 + 二次调用续等）、
+ * 同 tick 批量完成、10 分钟硬上限与 clamp、去重、不动父代理 inbox。
  * 以 fake ctx 直接驱动 apply 注册的 subagent/end 监听器与 wait_subagent 工具。
  */
 
@@ -32,6 +33,24 @@ function makeExec(inbox) {
   return { agent: { id: 'parent-1', inbox } }
 }
 
+/** 可控的 AbortSignal 替身：只关心 abort 监听的注册/解绑账目。 */
+function makeSignal() {
+  const listeners = new Set()
+  return {
+    aborted: false,
+    listeners,
+    addEventListener: (event, fn) => {
+      if (event === 'abort') listeners.add(fn)
+    },
+    removeEventListener: (event, fn) => {
+      if (event === 'abort') listeners.delete(fn)
+    },
+    abort: () => {
+      for (const fn of [...listeners]) fn()
+    },
+  }
+}
+
 /** 让 execute 走过首个 await（listChildren），到达等待注册点。 */
 async function flushMicrotasks() {
   for (let i = 0; i < 8; i++) await Promise.resolve()
@@ -46,6 +65,10 @@ function fireEnd(ctx, info) {
 
 const DONE = (id, stop = 'completed') =>
   `subagent ${id} done (${stop}); its closing message follows as the settlement notice.`
+
+/** first-completion 提前返回时的收尾行：列出仍在跑的 id。 */
+const STILL = (...ids) =>
+  `still running: ${ids.join(', ')} — call wait_subagent again with them to wait for the next one; you will also be notified when each finishes.`
 
 test('插件契约：name / inject / 工具注册（subagent_id 为数组）', () => {
   assert.equal(name, 'tool-wait-subagent')
@@ -141,19 +164,50 @@ test('子代理以 error 收场 → done 行标注 error stopReason，内容仍�
   assert.ok(!out.includes('Model not found'))
 })
 
-test('多 id 并发等待：先后结算，按输入顺序各出一行 done', async () => {
+test('first-completion：任一 id 结算即返回，不等同批其它 id，并列出 still running', async () => {
   const ctx = makeCtx({ children: [{ id: 'child-1' }, { id: 'child-2' }] })
   ctx.agentStatus.set('child-1', { status: 'running' })
   ctx.agentStatus.set('child-2', { status: 'running' })
   const pending = ctx.getTool().execute({ subagent_id: ['child-1', 'child-2'] }, makeExec())
   await flushMicrotasks()
-  // child-2 先结算，child-1 后结算；返回仍按输入顺序。
+  // child-2 先结算：旧 barrier 语义会继续等 child-1，first-completion 立即返回。
   fireEnd(ctx, { id: 'child-2', lastAssistantMessage: '二号线结果', stopReason: 'completed' })
-  fireEnd(ctx, { id: 'child-1', lastAssistantMessage: '一号结果', stopReason: 'completed' })
-  assert.equal(await pending, `${DONE('child-1')}\n${DONE('child-2')}`)
+  const out = await pending
+  assert.equal(out, `${DONE('child-2')}\n${STILL('child-1')}`)
 })
 
-test('混合收场：一个结算一个超时 → done 行 + timed out 行', async (t) => {
+test('first-completion 后带上剩余 id 再调一次 → 等到它结算，无 still running 行', async () => {
+  const ctx = makeCtx({ children: [{ id: 'child-1' }, { id: 'child-2' }] })
+  ctx.agentStatus.set('child-1', { status: 'running' })
+  ctx.agentStatus.set('child-2', { status: 'running' })
+  const first = ctx.getTool().execute({ subagent_id: ['child-1', 'child-2'] }, makeExec())
+  await flushMicrotasks()
+  fireEnd(ctx, { id: 'child-1', lastAssistantMessage: '一号结果', stopReason: 'completed' })
+  assert.equal(await first, `${DONE('child-1')}\n${STILL('child-2')}`)
+
+  // 第二次调用（调用方按指引带上剩余 id）：child-2 仍在跑，等到它结算。
+  const second = ctx.getTool().execute({ subagent_id: ['child-2'] }, makeExec())
+  await flushMicrotasks()
+  fireEnd(ctx, { id: 'child-2', lastAssistantMessage: '二号结果', stopReason: 'completed' })
+  assert.equal(await second, DONE('child-2'))
+})
+
+test('同 tick 批量完成：连续两次 fireEnd → 两行 done，无 still running 行', async () => {
+  const ctx = makeCtx({ children: [{ id: 'child-1' }, { id: 'child-2' }] })
+  ctx.agentStatus.set('child-1', { status: 'running' })
+  ctx.agentStatus.set('child-2', { status: 'running' })
+  const pending = ctx.getTool().execute({ subagent_id: ['child-1', 'child-2'] }, makeExec())
+  await flushMicrotasks()
+  // 同一 tick 内先后结算：第二次结算在 execute 的 await 续体之前落地，必须在
+  // 同一个结果里报告，不逼调用方再空调一次。
+  fireEnd(ctx, { id: 'child-2', lastAssistantMessage: '二号线结果', stopReason: 'completed' })
+  fireEnd(ctx, { id: 'child-1', lastAssistantMessage: '一号结果', stopReason: 'completed' })
+  const out = await pending
+  assert.equal(out, `${DONE('child-1')}\n${DONE('child-2')}`)
+  assert.ok(!out.includes('still running:'))
+})
+
+test('一个结算一个仍在跑：settle 即返回，不等到窗口到期（混合收场）', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] })
   const ctx = makeCtx({ children: [{ id: 'child-1' }, { id: 'child-2' }] })
   ctx.agentStatus.set('child-1', { status: 'running' })
@@ -161,12 +215,52 @@ test('混合收场：一个结算一个超时 → done 行 + timed out 行', asy
   const pending = ctx.getTool().execute({ subagent_id: ['child-1', 'child-2'], timeout_ms: 5000 }, makeExec())
   await flushMicrotasks()
   fireEnd(ctx, { id: 'child-1', lastAssistantMessage: '快的结果', stopReason: 'completed' })
+  const out = await pending
+  assert.equal(out, `${DONE('child-1')}\n${STILL('child-2')}`)
+  // 提前返回发生在窗口到期之前：没有 timed out 行。
+  assert.ok(!out.includes('timed out'))
+  // 返回后共享窗口的 timer 已被清理：再推进时钟不再产生任何结果。
   t.mock.timers.tick(5000)
+  assert.equal(await pending, out)
+})
+
+test('不传 timeout_ms → 10 分钟硬上限：tick 600_000 后全部 timed out', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] })
+  const ctx = makeCtx({ children: [{ id: 'child-1' }, { id: 'child-2' }] })
+  ctx.agentStatus.set('child-1', { status: 'running' })
+  ctx.agentStatus.set('child-2', { status: 'running' })
+  const pending = ctx.getTool().execute({ subagent_id: ['child-1', 'child-2'] }, makeExec())
+  await flushMicrotasks()
+  t.mock.timers.tick(600_000)
   const out = await pending
   const lines = out.split('\n')
   assert.equal(lines.length, 2)
-  assert.equal(lines[0], DONE('child-1'))
+  assert.match(lines[0], /timed out waiting for subagent child-1/)
   assert.match(lines[1], /timed out waiting for subagent child-2/)
+  assert.ok(!out.includes('still running:'))
+})
+
+test('clamp：timeout_ms 超过硬上限 → 600_000 即到期（不按 600_500 等）', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] })
+  const ctx = makeCtx({ children: [{ id: 'child-1' }] })
+  ctx.agentStatus.set('child-1', { status: 'running' })
+  const pending = ctx.getTool().execute({ subagent_id: ['child-1'], timeout_ms: 600_500 }, makeExec())
+  await flushMicrotasks()
+  // 未 clamp 的话 600_500 的 timer 还没到期，这里会挂住。
+  t.mock.timers.tick(600_000)
+  assert.match(await pending, /timed out waiting for subagent child-1/)
+})
+
+test('timeout_ms 为 0 / 负数 / 非数字 → 视同不传，沿用 600_000 硬上限', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] })
+  for (const value of [0, -1, 'soon']) {
+    const ctx = makeCtx({ children: [{ id: 'child-1' }] })
+    ctx.agentStatus.set('child-1', { status: 'running' })
+    const pending = ctx.getTool().execute({ subagent_id: ['child-1'], timeout_ms: value }, makeExec())
+    await flushMicrotasks()
+    t.mock.timers.tick(600_000)
+    assert.match(await pending, /timed out waiting for subagent child-1/, `timeout_ms=${String(value)}`)
+  }
 })
 
 test('重复 id 去重：同 id 传两次只出一行', async () => {
@@ -205,4 +299,36 @@ test('收场时不做 inbox 手术：父代理 pending 队列原样保留（内�
   // 零 splice：通知与 mid-run 消息全部留给框架投递。
   assert.deepEqual(spliced, [])
   assert.equal(inbox.nextStep.length, 3)
+})
+
+test('first-completion 提前返回即清理：abort 监听解绑，返回后的事件不再影响结果', async () => {
+  const ctx = makeCtx({ children: [{ id: 'child-1' }, { id: 'child-2' }] })
+  ctx.agentStatus.set('child-1', { status: 'running' })
+  ctx.agentStatus.set('child-2', { status: 'running' })
+  const signal = makeSignal()
+  const tool = ctx.getTool()
+  const pending = tool.execute({ subagent_id: ['child-1', 'child-2'] }, { agent: { id: 'parent-1' }, signal })
+  await flushMicrotasks()
+  assert.equal(signal.listeners.size, 1, '等待期间应挂上 abort 监听')
+  fireEnd(ctx, { id: 'child-1', lastAssistantMessage: '一号结果', stopReason: 'completed' })
+  const out = await pending
+  assert.equal(out, `${DONE('child-1')}\n${STILL('child-2')}`)
+  // 提前返回后：abort 监听已解绑（未被等到的 id 也不会留下监听）。
+  assert.equal(signal.listeners.size, 0)
+  // 之后 child-2 自己结算：不再属于这次等待，结果不变。
+  fireEnd(ctx, { id: 'child-2', lastAssistantMessage: '二号结果', stopReason: 'completed' })
+  assert.equal(await pending, out)
+})
+
+test('abort：全部标 aborted → 折叠单行，监听解绑', async () => {
+  const ctx = makeCtx({ children: [{ id: 'child-1' }, { id: 'child-2' }] })
+  ctx.agentStatus.set('child-1', { status: 'running' })
+  ctx.agentStatus.set('child-2', { status: 'running' })
+  const signal = makeSignal()
+  const pending = ctx.getTool().execute({ subagent_id: ['child-1', 'child-2'] }, { agent: { id: 'parent-1' }, signal })
+  await flushMicrotasks()
+  signal.aborted = true
+  signal.abort()
+  assert.equal(await pending, 'wait for 2 subagents was aborted by user interruption; the children may still be running.')
+  assert.equal(signal.listeners.size, 0)
 })
