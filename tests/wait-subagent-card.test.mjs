@@ -1491,8 +1491,9 @@ test('apply：subagent 与每个角色工具都有 keyed 座位，注册项除 k
   const { ctx, seats } = makeCtx()
   client.apply(ctx)
 
-  // 角色名是 dsh-subagent-dispatch 配置里的事实（profile patch 的 roles 段）：改了
-  // 配置而没改这张表，那些工具的卡就悄悄退回通用行——所以这里硬编码对照。
+  // 角色名是 eng/research preset 里官方 `tool-subagent` 角色行的事实（每行自带
+  // `models` 别名表）：改了 preset 而没改这张表，那些工具的卡就悄悄退回通用行
+  // ——所以这里硬编码对照。
   const roles = ['researcher', 'scout', 'tdd-tester', 'implementer', 'reviewer', 'code-quality-reviewer', 'lark']
   assert.deepEqual(client.__test.dispatchToolNames, ['subagent', ...roles])
 

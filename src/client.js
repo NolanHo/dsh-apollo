@@ -154,11 +154,11 @@ window.__ModuleLoader__.load({
 		}
 		/**
 		 * 本插件接管工具卡的全部 wire 工具名：官方 `wait_subagent` 加派发工具。
-		 * `subagent` 是 dsh-subagent-dispatch 的通用派发工具，其余是它在
-		 * `roles` 配置里注册的角色工具（本机 profile patch 的七个工程角色）。座位按
-		 * wire 工具名分发，没有 entry 认领的键从来不会出现——列多了只是几个空注册，
-		 * 列少了那个工具的卡就退回通用行。名字是配置事实：插件配置里加了角色，这里
-		 * 要跟着加。
+		 * 派发面由 eng/research preset 的官方 `tool-subagent` 行提供：`subagent`
+		 * 是通用派发行，其余是各角色行（每行自带 `models` 别名表，表内子集就是该
+		 * 行的授权面）。座位按 wire 工具名分发，没有 entry 认领的键从来不会出现——
+		 * 列多了只是几个空注册，列少了那个工具的卡就退回通用行。名字是配置事实：
+		 * preset 里加了角色行，这里要跟着加。
 		 */
 		const DISPATCH_TOOL_NAMES = [
 			'subagent',

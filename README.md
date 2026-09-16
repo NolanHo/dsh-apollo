@@ -135,7 +135,7 @@ rm -rf ~/.dsh/.agent-presets/eng
 
 ### 派发工具的卡片
 
-同一个座位还按 wire 工具名接管**派发工具**：`subagent`（`dsh-subagent-dispatch` 的通用派发工具）与它在 `roles` 配置里注册的每个角色工具（本机 profile patch 的 `researcher` / `scout` / `tdd-tester` / `implementer` / `reviewer` / `code-quality-reviewer` / `lark`）。名单写在 `src/client.js` 的 `DISPATCH_TOOL_NAMES`：**改插件配置里的角色，这里要跟着加**（名字对不上只是退回通用行，不会报错）。
+同一个座位还按 wire 工具名接管**派发工具**：`subagent` 与每个角色工具，全部来自 eng/research preset 的官方 `tool-subagent` 行（每行自带 `models` 别名表，表内子集就是该行的授权面）。名单写在 `src/client.js` 的 `DISPATCH_TOOL_NAMES`：`researcher` / `scout` / `tdd-tester` / `implementer` / `reviewer` / `code-quality-reviewer` / `lark`——**preset 里加了角色行，这里要跟着加**（名字对不上只是退回通用行，不会报错）。
 
 - **折叠摘要**是 `工具名 · 模型 · 描述`；`model` 缺席时整段省掉（不留空分隔符），`description` 缺席时用压平截断后的提示词顶上，两项都拿不到（参数还在流式写入、调用头被窗口截断、JSON 畸形）时交给通用行显示原始参数 JSON。
 - **展开体不是参数 JSON**，而是四块：描述（无则省）、元信息行（`模型 ?? 默认模型` · `后台派发`/`前台等待`）、提示词正文，以及这次派发出来的**子代理那一行实时信息**。
