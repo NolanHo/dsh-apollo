@@ -5,8 +5,11 @@
  *  - the delegation/orchestration policy (when to delegate, write scopes,
  *    verification, failure handling), moved out of the user-global
  *    ~/.dsh/AGENTS.md on 2026-09-11.
- * Model tiers stay in ~/.dsh/AGENTS.md: they mirror this host's
- * `subagent-model-selection.allowedModels` route list, which is local config.
+ * Model tiers stay in ~/.dsh/AGENTS.md: they mirror this host's delegation
+ * surface — the per-row `models` alias tables on the eng preset's official
+ * `tool-subagent` rows (2026-09-16). The session-level
+ * `subagent-model-selection` policy is NOT configured on this host, so nothing
+ * here should reference it.
  * Everything else — tool mechanics, background-job etiquette, sleep caps —
  * lives in the harness system prompt or the tool descriptions, and is
  * deliberately NOT repeated here. Dedupe first, inject only the delta.
@@ -32,6 +35,7 @@ const TEXT = [
   '- 默认委派：只读、可并行、无状态的调查一律派出去（含大型/陌生仓库、前端代码、批量排查），同一批独立任务在一条消息里一起派，不在主线程先试一遍。',
   '- 转委派阈值：主线程在同一问题上深挖 1–2 轮未收敛，立即把未解范围派出去。',
   '- 实现分层：写入范围互不重叠的独立实现块派子代理并行推进；线性推进、强耦合改动、需要持续控制活状态的调试（活进程、串行打补丁）留主线程。',
+  '- 舰队并行度：舰队模式一经进入（通常由人类要求）即无退出选项——任意时刻保持 ≥3 个 subagent 在工作（编成、回填、收敛前都算）；独立线索凑不满时派监督 subagent 审查本轮改动（diff 对照目标、回归风险、验证证据）补位，不闲置、不降级退出。回填按 continuous batching：一个 subagent 做完的当轮立刻分析其结果、结论定下一支并立即派出，槽位独立周转、不攒批、不等整轮。',
   '- 扇出用 workflow：同一形状的工作重复多份（审计、迁移、多角度验证、批量修复）即属大型多代理编排，直接写 workflow 脚本一次编排；一两次委派仍用 subagent。',
   '- 派发写明目标、写入范围、交付物与验证方式；引用的前置产出给实际文件路径——子代理看不到父对话。',
   '- 并行实现子代理的写入范围不得重叠；最终集成、审查、验证由主代理负责；子代理报告是线索不是证据，亲自核对实际变更状态。',
