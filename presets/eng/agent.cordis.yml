@@ -204,18 +204,134 @@
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
 
-    # 本 fork 的部署侧 delta（tests/upstream-drift.test.mjs 的 ROW_OVERRIDES
-    # 同步声明）：本机另一个插件接管 `subagent` 工具名并提供 role 工具与
-    # model 白名单；preset 作用域会遮蔽全局注册，故官方通用行必须让出该名字。
-    # 上游无此键——这是本 fork 相对上游 standard 唯一的行配置差异。
+    # 官方派发面（2026-09-18 落源树）：dsh-subagent-dispatch 插件退役，其
+    # 模型别名面由官方 tool-subagent 的 fork 配置面承载（FORK_CHANGES.md
+    # 2026-09-16 条目）。一行一个 spawn 实例——本行是通用 `subagent`，下面
+    # 8 个角色行各注册自己的工具名。每行的 `models` 是该实例的别名表，同时
+    # 就是它的授权面：行内子集互不可见，面外别名 fail loud 并枚举本行允许项。
+    # `models` 与 `modelSelectionSettings` 互斥，故不声明后者（相对上游
+    # standard 的键差异由 tests/upstream-drift.test.mjs 的 ROW_OVERRIDES 声明）。
+    #
+    # 2026-09-16 model policy (user decision): ordinary delegation uses
+    # `deepseek-flash` or `glm-5.3` only; the three cross-provider heavy
+    # aliases live in the roundtable row alone (persona decorrelation), so a
+    # non-roundtable dispatch cannot reach them. `glm-5.3-flash` stays
+    # unlisted deliberately — it measured slower than glm-5.3 (51 vs 64 tok/s).
     - id: tool-subagent
       name: '@deepseek-ai/dsh-tool-subagent'
-      disabled: true
       config:
         provider: spawn
         toolName: subagent
-        modelSelectionSettings: true
         backgroundMode: continuable
+        defaultModel: deepseek-flash
+        models:
+          # Route facts come from the runtime's own catalog: `deepseek-flash`
+          # on pai-ds (the deepseek-official pass-through strands the bare id
+          # at stopReason=error), `glm-5.3` on zhipu-official (probe: 63.8
+          # tok/s end-to-end vs 47.9 on the glm-cn/mintcn route).
+          - { alias: deepseek-flash, provider: pai-ds, model: deepseek-flash, reasoningEffort: xhigh }
+          - { alias: glm-5.3, provider: zhipu-official, model: glm-5.3, reasoningEffort: max }
+
+    # 角色行：PERSONA/SKILL 正文与六字段派发契约经派发 prompt 注入，不经
+    # config（toolFilter/skillFilter 保持 opt-in）。engineering 角色不设
+    # skillFilter——children 看全量工具面与技能目录（2026-08-29 决定，推荐
+    # 工具集走派发 prompt 的软引导）；researcher 钉 cwd /root/code；lark 的
+    # 隔离是结构性的（主目录无 lark 技能，其 workspace 从 ~/.agents/skills
+    # 发现整套 suite，allowlist 把 child 限于该 suite）。
+    - id: tool-subagent-roundtable
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: roundtable
+        backgroundMode: continuable
+        defaultModel: deepseek-v4-pro
+        models:
+          - { alias: deepseek-v4-pro, provider: deepseek-official, model: deepseek-v4-pro, reasoningEffort: max }
+          - { alias: gpt-5.6-sol, provider: pai-gpt, model: gpt-5.6-sol, reasoningEffort: xhigh }
+          - { alias: macaron-v1-venti, provider: macaronai, model: macaron-v1-venti, reasoningEffort: xhigh }
+          - { alias: deepseek-flash, provider: pai-ds, model: deepseek-flash, reasoningEffort: xhigh }
+          - { alias: glm-5.3, provider: zhipu-official, model: glm-5.3, reasoningEffort: max }
+
+    - id: tool-subagent-researcher
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: researcher
+        backgroundMode: continuable
+        cwd: /root/code
+        defaultModel: deepseek-flash
+        models:
+          - { alias: deepseek-flash, provider: pai-ds, model: deepseek-flash, reasoningEffort: xhigh }
+          - { alias: glm-5.3, provider: zhipu-official, model: glm-5.3, reasoningEffort: max }
+
+    - id: tool-subagent-scout
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: scout
+        backgroundMode: continuable
+        defaultModel: deepseek-flash
+        models:
+          - { alias: deepseek-flash, provider: pai-ds, model: deepseek-flash, reasoningEffort: xhigh }
+          - { alias: glm-5.3, provider: zhipu-official, model: glm-5.3, reasoningEffort: max }
+
+    - id: tool-subagent-tdd-tester
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: tdd-tester
+        backgroundMode: continuable
+        defaultModel: deepseek-flash
+        models:
+          - { alias: deepseek-flash, provider: pai-ds, model: deepseek-flash, reasoningEffort: xhigh }
+          - { alias: glm-5.3, provider: zhipu-official, model: glm-5.3, reasoningEffort: max }
+
+    - id: tool-subagent-implementer
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: implementer
+        backgroundMode: continuable
+        defaultModel: deepseek-flash
+        models:
+          - { alias: deepseek-flash, provider: pai-ds, model: deepseek-flash, reasoningEffort: xhigh }
+          - { alias: glm-5.3, provider: zhipu-official, model: glm-5.3, reasoningEffort: max }
+
+    - id: tool-subagent-reviewer
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: reviewer
+        backgroundMode: continuable
+        defaultModel: deepseek-flash
+        models:
+          - { alias: deepseek-flash, provider: pai-ds, model: deepseek-flash, reasoningEffort: xhigh }
+          - { alias: glm-5.3, provider: zhipu-official, model: glm-5.3, reasoningEffort: max }
+
+    - id: tool-subagent-code-quality-reviewer
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: code-quality-reviewer
+        backgroundMode: continuable
+        defaultModel: deepseek-flash
+        models:
+          - { alias: deepseek-flash, provider: pai-ds, model: deepseek-flash, reasoningEffort: xhigh }
+          - { alias: glm-5.3, provider: zhipu-official, model: glm-5.3, reasoningEffort: max }
+
+    - id: tool-subagent-lark
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: lark
+        backgroundMode: continuable
+        cwd: /root/.dsh/lark-agent
+        skillFilter:
+          allow: [lark-shared, lark-doc, lark-wiki, lark-markdown, lark-drive, lark-sheets, lark-base, lark-slides, lark-whiteboard, lark-vc, lark-vc-agent, lark-minutes, lark-note, lark-calendar, lark-mail, lark-im, lark-task, lark-okr, lark-approval, lark-contact, lark-attendance, lark-event, lark-apps, lark-openapi-explorer, lark-skill-maker, lark-workflow-meeting-summary, lark-workflow-standup-report]
+        defaultModel: deepseek-flash
+        models:
+          - { alias: deepseek-flash, provider: pai-ds, model: deepseek-flash, reasoningEffort: xhigh }
+          - { alias: glm-5.3, provider: zhipu-official, model: glm-5.3, reasoningEffort: max }
 
     # Fork omits model selection so provider/model stay equal to the parent and
     # the inherited history remains eligible for KV Cache reuse.

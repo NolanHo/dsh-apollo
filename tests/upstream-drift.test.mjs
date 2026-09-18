@@ -27,13 +27,22 @@ const ENG_PRESET = join(PACKAGE_ROOT, 'presets', 'eng')
 
 /**
  * 本包相对上游 standard 的有意差异。eng 只做加法、一处调参，和本 fork 的
- * 一条部署侧行覆盖：
+ * 部署侧行覆盖：
  * - 三个预设本地插件行（eng 独有）；
  * - tool-result-pruner 的阈值放大到 2 倍，上游值由下方 pruner 常量描述；
- * - `tool-subagent` 行多一个 `disabled: true`（本 fork 的部署 delta，
- *   由下方 ROW_OVERRIDES 声明）。
+ * - delegation 组里 8 个官方 tool-subagent 角色行（本 fork 的派发面，
+ *   2026-09-18 随 dsh-subagent-dispatch 退役加入；通用行 `tool-subagent`
+ *   不是新行，其键差异由下方 ROW_OVERRIDES 声明）。
  */
 const EXTRA_ENG_ROWS = [
+  "tool-subagent-roundtable -> @deepseek-ai/dsh-tool-subagent",
+  "tool-subagent-researcher -> @deepseek-ai/dsh-tool-subagent",
+  "tool-subagent-scout -> @deepseek-ai/dsh-tool-subagent",
+  "tool-subagent-tdd-tester -> @deepseek-ai/dsh-tool-subagent",
+  "tool-subagent-implementer -> @deepseek-ai/dsh-tool-subagent",
+  "tool-subagent-reviewer -> @deepseek-ai/dsh-tool-subagent",
+  "tool-subagent-code-quality-reviewer -> @deepseek-ai/dsh-tool-subagent",
+  "tool-subagent-lark -> @deepseek-ai/dsh-tool-subagent",
   "tool-wait-subagent -> ./plugins/wait-subagent/index.js",
   "eng-exit-guard -> ./plugins/exit-guard/index.js",
   "eng-mode-instructions -> ./plugins/mode-instructions/index.js",
@@ -52,9 +61,12 @@ const PRUNER_OVERRIDES = new Map([
  * undefined——声明本身就是"这里是相对上游的差异，且差异已知"。
  */
 const ROW_OVERRIDES = new Map([
-  // 部署侧另一个插件接管 `subagent` 工具名；preset 作用域遮蔽全局注册，
-  // 故官方通用行必须让出该名字（上游无 `disabled` 键）。
-  ['tool-subagent', new Map([['disabled', undefined]])],
+  // 派发面的官方承载（2026-09-18）：本 fork 的 tool-subagent 配置面给该行
+  // 加了 `models` 别名表与 `defaultModel`（上游均无此键），同时删掉了上游
+  // 的 `modelSelectionSettings: true`——`models` 与它互斥，保留会在 mount
+  // 期 fail loud。键删除不在本测试的检测面（遍历以 eng 键为准），故只声明
+  // 新增键。
+  ['tool-subagent', new Map([['defaultModel', undefined], ['models.*', undefined]])],
 ])
 
 /**
