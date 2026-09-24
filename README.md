@@ -26,22 +26,27 @@ dsh --profile <name> --dump-config   # 应出现 "# == dsh-apollo" 层与 apollo
 重启该 profile 的 dsh 进程后生效：
 
 - 新会话的技能目录包含下列流程技能（技能注册在全局层，任何挂载 `tool-skill` 的 preset 都看得到）；
-- 包内 `presets/eng/` 被同步进 `<dshHome>/.agent-presets/eng`，预设选择器里出现「工程模式」。预设根虽在启动早期扫描，但同步发生在首个请求之前，**一次重启即可**（2026-09-12 在隔离 `DSH_HOME` 上实测：首次启动后副本已存在且与包内校验和一致）。
+- 包内 `presets/eng/` 被渲染成声明 bundle 写进 `<dshHome>/local-bundles/dsh-preset-eng`；把该 bundle 装进 profile 后（`plugin_manager` 的 `install_bundle`，一次性动作），预设选择器里出现「工程模式」。0.1.7 起宿主不再扫描 `<dshHome>/.agent-presets`，插件上电时会退役自己曾写在那里的目录。
 
 把工程模式设为默认（用户级设置，不随仓库分发）：
 
 ```yaml
-# ~/.dsh/settings.yaml
-agent-presets:
-  default: eng
+# <profile>/cordis.patch.yml（profile 目录，如 ~/.dsh/profiles/web/）
+- id: agent-preset-registry
+  name: '@deepseek-ai/dsh-agent-preset-registry'
+  config:
+    default: eng
 ```
+
+0.1.7 移除了独立的 `~/.dsh/settings.yaml`：它的内容被迁进 profile 的设置存储，默认预设改由 `@deepseek-ai/dsh-agent-preset-registry` 行的 `config.default` 承载（旧行名 `@deepseek-ai/dsh-agent-presets` 已不存在，照抄旧行不会生效）。
 
 卸载：
 
 ```sh
 dsh plugin --profile <name> remove dsh-apollo
-# 同步副本不会自动删除，需要时手动清理：
-rm -rf ~/.dsh/.agent-presets/eng
+# bundle 是插件渲染出来的；从 profile 移除后需要时手动清理：
+dsh plugin --profile <name> remove dsh-preset-eng
+rm -rf ~/.dsh/local-bundles/dsh-preset-eng
 ```
 
 ## 流程技能
@@ -68,12 +73,12 @@ rm -rf ~/.dsh/.agent-presets/eng
 
 ## 工程模式预设（eng）
 
-`presets/eng/` 是一棵完整的 preset 树，启动时同步进用户预设根：
+`presets/eng/` 是预设源树（0.1.7 起，启动时渲染成 `<dshHome>/local-bundles/dsh-preset-eng` 这个**声明 bundle**：`package.json` 声明 `dsh.bundle.patch`，渲染出的 `preset.patch.yml` 用 `@deepseek-ai/dsh-agent-preset` 行声明 `{id, name, description, order, plugins}`，自带资产随 bundle 复制）：
 
 | 文件 | 作用 |
 |---|---|
 | `agent.cordis.yml` | preset 组合（改编自 DSH 内置 standard preset，MIT，见 `presets/eng/NOTICE`）：工具、委派、plan mode、压缩与提示词段 |
-| `preset.yml` | 预设元数据（名称「工程模式」） |
+| `preset.yml` | 预设元数据（名称、描述、可选 `order`）；渲染进声明行的 `name`/`description`/`order` |
 | `plugins/exit-guard/` | 退出守卫：`agent/turn-stopping` 时若有运行中的直接子代理或后台任务，注入提醒强制回合继续 |
 | `plugins/wait-subagent/` | `wait_subagent` 工具：一次调用并发盯住多个直接子代理，任一结算即返回短 done 行并列出仍在跑的 id（单次最长等 10 分钟），内容交还框架的 settlement notice |
 | `plugins/mode-instructions/` | eng 专属提示词段：退出守卫契约 + 子代理委派/编排纪律（只写其它表面未述的 delta；委派纪律原在全局 `~/.dsh/AGENTS.md`，2026-09-11 迁入；模型档位留在全局，因其跟随本机路由配置） |
@@ -81,7 +86,7 @@ rm -rf ~/.dsh/.agent-presets/eng
 
 预设是内置 `standard` 的整棵拷贝（DSH 没有 extends/include 机制，插件也无法新增预设根）。拷贝就会漂移：`node --test` 里的 `tests/upstream-drift.test.mjs` 拿本机 DSH 的 `standard` 对照，**上游有而 eng 没有的行直接判失败并列出该补哪一行**，并挡住未声明的配置差异。2026-09-12 补回的上游行是 `@deepseek-ai/dsh-tool-present`（缺失时静默没有 `present` 工具）。
 
-同步是**整体覆盖**：包内树与副本不一致时整棵重写，并删除源树没有的文件。不要把自己的内容放进 `<dshHome>/.agent-presets/eng`——首次启动就被清掉。
+渲染是**整体覆盖**：目标 bundle 与渲染结果不一致时整棵重写，并删除渲染结果里没有的文件。不要把自己的内容放进 `<dshHome>/local-bundles/dsh-preset-eng`——覆盖会删掉它。行清单里的相对插件名（`./plugins/x/index.js`）在渲染时被改写成 `file://` 绝对 URL：0.1.7 的 registry 直接挂载 `config.plugins`，不经过会锚定相对名的 patch 读取路径，留下相对名会让该行拿不到 fiber（宿主报 “never started”）。
 
 ## 运行时配置
 
@@ -148,12 +153,12 @@ rm -rf ~/.dsh/.agent-presets/eng
 `cordis.patch.yml` 只插入**一行**宿主插件 `apollo-skills`（裸包名 `dsh-apollo`）。单行是硬约束，不是偏好：
 
 - 浏览器半边（`dsh.client` → `exports["./client"]`）由该行的**包清单**发现，而 `dsh-client-modules` 只接受裸包名或两段 scoped 名，并且拒绝第二个解析到同一包名的活跃行；
-- DSH 只扫描内置预设根与 `<dshHome>/.agent-presets`，profile patch 无法新增预设根——所以包内预设只能在上电时同步进用户根（sync-on-boot，参照 dsh-web 生态的 dsh-liangshen）。
+- 0.1.7 起 preset 的载体是声明 bundle（`dsh.bundle.patch` 里的 `@deepseek-ai/dsh-agent-preset` 行），旧的 `<dshHome>/.agent-presets` 目录已无人读取——所以包内预设在上电时渲染成 bundle 写进 `<dshHome>/local-bundles`，再由 profile 选中（`plugin_manager` 的 `install_bundle`，选中状态落在 profile 的 `dsh.profile.bundles`）。
 
 因此这一行的 node 半边（`src/index.js`）承担三件事：
 
 1. `src/index.js` — 扫描包内 `skills/*/SKILL.md`，解析 frontmatter（`name` / `description` / `whenToUse` / `disable-model-invocation` / `user-invocable`，其余键进 metadata），以 rank 600 注册到 `ctx.skills` 全局层。技能正文中的相对资源引用按该技能目录解析。
-2. `src/preset-sync.js` — 把 `presets/` 逐字节幂等同步进 `<dshHome>/.agent-presets`：已一致则跳过，变更整体重写并清理源树不含的多余文件，不触碰插件不拥有的预设目录。
+2. `src/preset-sync.js` — 把 `presets/` 渲染成声明 bundle 并逐字节幂等同步进 `<dshHome>/local-bundles`：已一致则跳过，变更整体重写并清理多余文件，同时退役旧发现根里插件发布过的目录（`retireLegacyPresets`）。
 3. `src/panel.js` — 注册 `/eng-panel/api/config` 路由；`declareOwnsHost: true` 时装配 `<head>` 注入 tap。
 
 无 watcher：技能与预设内容随包版本走，改动在进程重启后生效。
@@ -173,7 +178,7 @@ rm -rf ~/.dsh/.agent-presets/eng
 node --test          # 122 例：技能 provider、捆绑技能目录、预设同步、预设漂移自检、配置读取、退出守卫、wait_subagent、面板路由、工具卡（座位与词典契约、wait_subagent 参数解析、派发参数/摘要/子会话 id 解析、折叠/时长纯函数、follow 请求形状、流订阅差分与所有权、两个卡的组件级渲染与生命周期）
 ```
 
-`presets/eng/` 是仓库内的唯一事实源，`<dshHome>/.agent-presets/eng` 是启动时同步出来的副本——**不要直接编辑副本**，下次启动会被覆盖。跑 `node --test` 会顺带把源树同步进副本（漂移自检的一部分），所以改完预设先跑测试再重启。
+`presets/eng/` 是仓库内的唯一事实源，`<dshHome>/local-bundles/dsh-preset-eng` 是启动时渲染出来的 bundle——**不要直接编辑副本**，下次启动会被覆盖。跑 `node --test` 会顺带把源树渲染进 bundle（漂移自检的一部分），所以改完预设先跑测试再重启。
 
 ## 许可
 

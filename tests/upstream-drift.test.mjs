@@ -232,29 +232,26 @@ test('eng 预设引用的每个模块都能在 DSH 里解析到', (t) => {
   assert.deepEqual(unresolved, [], `eng 引用了本机 DSH 解析不到的模块：\n${unresolved.join('\n')}`)
 })
 
-test('包内 eng 源树与 <dshHome>/.agent-presets/eng 副本一致（顺带刷新副本）', () => {
-  const targetRoot = join(dshHome(), '.agent-presets')
+test('包内 eng 源树渲染出的 bundle 保留全部行清单与自带资产（顺带刷新 bundle）', () => {
+  const targetRoot = join(dshHome(), 'local-bundles')
   const result = syncPresetTrees(join(PACKAGE_ROOT, 'presets'), targetRoot)
-  assert.deepEqual(result.failed, [], `同步失败：${JSON.stringify(result.failed)}`)
+  assert.deepEqual(result.failed, [], `渲染失败：${JSON.stringify(result.failed)}`)
 
-  // 同步后逐文件比对：源树 ⊆ 副本且内容一致。
-  const sourceRoot = ENG_PRESET
-  const copyRoot = join(targetRoot, 'eng')
-  const files = walk(sourceRoot, copyRoot)
-  // 健全性检查：树被清空或走错目录时上面的逐文件断言会「零次通过」。
-  assert.equal(files.includes('agent.cordis.yml'), true, `源树里没有 agent.cordis.yml：${files.join(', ')}`)
-  assert.equal(files.length >= 10, true, `eng 源树文件数异常偏少：${files.length}`)
+  const bundleRoot = join(targetRoot, 'dsh-preset-eng')
+  const patch = readFileSync(join(bundleRoot, 'preset.patch.yml'), 'utf8')
+  const sourceRows = rowIds(readFileSync(join(ENG_PRESET, 'agent.cordis.yml'), 'utf8'))
+  const renderedRows = rowIds(patch)
+  // 健全性检查：源树被清空或走错目录时下面的断言会「零次通过」。
+  assert.equal(sourceRows.length >= 10, true, `eng 源树行数异常偏少：${sourceRows.length}`)
+  for (const id of sourceRows) {
+    assert.equal(renderedRows.includes(id), true, `渲染结果缺少行 ${id}（跑 node --test 即会刷新 bundle）`)
+  }
+  // 0.1.7 的 registry 直接挂载 config.plugins，不锚定相对行名：渲染必须已换成绝对 URL。
+  assert.equal(/^\s*name:\s*\.\//m.test(patch), false, `渲染结果里仍有相对行名：\n${patch}`)
+  assert.equal(existsSync(join(bundleRoot, 'plugins')), true, '自带插件目录未随 bundle 复制')
 })
 
-/** 递归比对源树与副本，返回源树里的相对路径列表。 */
-function walk(dir, copyRoot, base = dir) {
-  return readdirSync(dir).flatMap((entry) => {
-    const path = join(dir, entry)
-    if (statSync(path).isDirectory()) return walk(path, copyRoot, base)
-    const rel = path.slice(base.length + 1)
-    const copy = join(copyRoot, rel)
-    assert.equal(existsSync(copy), true, `副本缺少 ${rel}（跑 node --test 即会刷新）`)
-    assert.equal(readFileSync(path, 'utf8'), readFileSync(copy, 'utf8'), `副本与源树不一致：${rel}`)
-    return [rel]
-  })
+/** 行清单里的顶层 `- id:` 值（含嵌套行，只看 id）。 */
+function rowIds(text) {
+  return [...text.matchAll(/^\s*- id: (\S+)$/gm)].map((match) => match[1])
 }

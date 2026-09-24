@@ -19,7 +19,7 @@ import { readFile, readdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { mountPanel } from './panel.js'
-import { dshHome, syncPresetTrees } from './preset-sync.js'
+import { dshHome, retireLegacyPresets, syncPresetTrees } from './preset-sync.js'
 
 const PROVIDER_NAME = 'dsh-apollo'
 /** Rank of bundled contributions in the local-provider ladder (user roots override). */
@@ -46,27 +46,33 @@ export function apply(ctx, config) {
 }
 
 /**
- * 把包内预设树同步进 harness home 的 agent-presets 发现根。
- * 幂等（逐字节对比，跳过已一致的树），重复挂载无害；失败只告警不抛错——
- * 同步故障不应阻止技能 provider 与面板就位。
+ * 把包内预设树渲染成 0.1.7 的声明 bundle 写进 harness home 的 `local-bundles/`，
+ * 并退役插件过去写下的 `<dshHome>/.agent-presets/<id>/` 旧目录（0.1.7 起宿主
+ * 不再扫描该根）。幂等（逐字节对比，跳过已一致的渲染结果），重复挂载无害；
+ * 失败只告警不抛错——同步故障不应阻止技能 provider 与面板就位。
  * @param ctx - 宿主插件上下文（仅用 `ctx.logger`，可缺省）。
  */
 function syncPresets(ctx) {
-  const targetRoot = join(dshHome(), '.agent-presets')
+  const targetRoot = join(dshHome(), 'local-bundles')
   const log = ctx?.logger ?? console
   try {
     const result = syncPresetTrees(bundledPresetsRoot(), targetRoot)
     for (const { id, error } of result.failed) {
-      log.warn?.(`dsh-apollo: preset ${id} sync failed: ${error}`)
+      log.warn?.(`dsh-apollo: preset ${id} bundle render failed: ${error}`)
     }
     if (result.synced.length > 0) {
-      log.info?.(`dsh-apollo: presets synced into ${targetRoot}: ${result.synced.join(', ')}`)
+      log.info?.(`dsh-apollo: preset bundles rendered into ${targetRoot}: ${result.synced.join(', ')}`)
     }
     if (result.current.length > 0) {
-      log.info?.(`dsh-apollo: presets already current in ${targetRoot}: ${result.current.join(', ')}`)
+      log.info?.(`dsh-apollo: preset bundles already current in ${targetRoot}: ${result.current.join(', ')}`)
     }
     if (result.retired.length > 0) {
-      log.info?.(`dsh-apollo: retired stale presets from ${targetRoot}: ${result.retired.join(', ')}`)
+      log.info?.(`dsh-apollo: retired stale preset bundles from ${targetRoot}: ${result.retired.join(', ')}`)
+    }
+    const legacyRoot = join(dshHome(), '.agent-presets')
+    const retired = retireLegacyPresets(bundledPresetsRoot(), legacyRoot)
+    if (retired.length > 0) {
+      log.info?.(`dsh-apollo: retired the legacy preset directories in ${legacyRoot}: ${retired.join(', ')}`)
     }
   } catch (error) {
     log.warn?.(`dsh-apollo: preset sync failed: ${error instanceof Error ? error.message : String(error)}`)
