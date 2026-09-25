@@ -902,7 +902,7 @@ window.__ModuleLoader__.load({
 		 * 丢，只是少了通用行外壳——展开体因此需要知道自己处在哪种形态（`standalone`）。
 		 *
 		 * @param props - 座位 props：callId/toolName/block/cwd/home/openFile/loadImage/
-		 *   inspect 原样透传给通用行。
+		 *   inspect/useDisclosure 原样透传给通用行。
 		 * @param summary - 折叠行摘要；undefined 时通用行退回显示参数 JSON。
 		 * @param buildBody - `(standalone) => 展开体元素`。
 		 * @returns 卡元素（通用行，或降级时的展开体本身）。
@@ -916,6 +916,10 @@ window.__ModuleLoader__.load({
 			const body = buildBody(standalone);
 			if (standalone) return body;
 			return h(generic, {
+				// harness 的行组件直接调用 owner 的 `useDisclosure()`（必需 owner prop，
+				// 展开态由它拥有）：漏透传就是行内 `undefined()` 崩溃，报错点在 harness
+				// 里、本插件的断言看不见，所以逐个座位 prop 点名，不用整体展开。
+				useDisclosure: props?.useDisclosure,
 				callId: props?.callId,
 				toolName: props?.toolName,
 				block: props?.block,

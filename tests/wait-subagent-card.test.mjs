@@ -50,8 +50,14 @@ const react = {
 /**
  * 通用工具行存根：折叠/展开归 harness 的 `ToolRow`（本插件的测试不覆盖它），这里
  * 只钉"展开体被作为 `bodyContent` 交给通用行、并带上 conversation 的翻译函数"。
+ *
+ * 收到的座位 props 整份留档：harness 的行直接调用 owner 的 `useDisclosure()`
+ * （必需 owner prop），少透传一个的崩溃发生在 harness 里，本插件的渲染断言看不见
+ * ——只有在交接点把 props 钉住才拦得住。
  */
+const genericRowProps = []
 function genericToolCardStub(props) {
+  genericRowProps.push(props)
   // 不渲染 bodyContent：生产里 `ToolRow` 是 `{open && children}`，收起时展开体
   // 根本不挂载；这把"折叠时不订阅"的语义留给 harness，也保证本文件里实时行的
   // 断言都打在展开体组件上。
@@ -59,10 +65,16 @@ function genericToolCardStub(props) {
     'data-generic-tool-card': props.toolName,
     'data-generic-body': props.bodyContent !== undefined,
     'data-generic-t': typeof props.t,
+    'data-generic-usedisclosure': typeof props.useDisclosure,
     'data-generic-summary': props.summary,
   })
 }
 const uiToolStub = { GenericToolCard: genericToolCardStub }
+
+/** 取走存根收到的座位 props（并清空，用例之间不串）。 */
+function takeGenericRowProps() {
+  return genericRowProps.splice(0, genericRowProps.length)
+}
 
 const client = definition.factory((name) => {
   if (name === 'react') return react
@@ -882,6 +894,38 @@ test('卡片：折叠行交给 harness 的通用行——展开体作为 bodyCon
   assert.equal(row.props['data-generic-summary'], '等待 2 个子代理', 'the collapsed summary is ours, never the argument JSON')
   // 展开体只在通用行展开时才挂载（ToolRow 的 {open && children}），所以这里尚未开流。
   assert.equal(calls.length, 0, 'nothing subscribes until the harness expands the row')
+})
+
+test('卡片：owner 的 useDisclosure 原样透传给通用行（harness 行的必需 owner prop）', async (t) => {
+  const { mount } = useReactRuntime(t)
+  applyWith({ 'remote.session': {} })
+
+  // 两个卡共用 genericToolShell，而展开态由 harness 的行调用 `useDisclosure()` 拥有：
+  // 少透传这一个 prop，行里就是 `undefined()` 崩溃，报错点在 harness、本插件的断言
+  // 看不见，所以逐卡把 owner → 行的交接钉在这里。
+  const disclosure = () => ({ expanded: false, toggle: () => {} })
+  const cases = [
+    [client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']) })],
+    [client.__test.DispatchToolCard, cardProps({ toolName: 'scout', block: runningDispatchBlock({ description: '读 spec' }) })],
+  ]
+  for (const [card, props] of cases) {
+    takeGenericRowProps()
+    const view = await mount(card, { ...props, useDisclosure: disclosure })
+    const [supplied] = takeGenericRowProps()
+    assert.notEqual(supplied, undefined, 'the shell renders the harness generic row')
+    assert.equal(typeof supplied.useDisclosure, 'function', 'the row can call the owner hook')
+    assert.equal(supplied.useDisclosure, disclosure, 'the owner hook travels unchanged (never re-wrapped)')
+    const row = findElement(view.tree, (node) => node.props?.['data-generic-tool-card'] !== undefined)
+    assert.equal(row.props['data-generic-usedisclosure'], 'function', 'the rendered row sees the hook')
+  }
+
+  // owner 没给（旧 owner 的座位）：外壳只透传、自己不调用也不自造，行照常渲染不崩。
+  takeGenericRowProps()
+  const bare = await mount(client.__test.WaitSubagentCard, cardProps({ block: runningBlock(['a']) }))
+  const [omitted] = takeGenericRowProps()
+  assert.equal(omitted.useDisclosure, undefined, 'an absent hook stays absent (never invented)')
+  const bareRow = findElement(bare.tree, (node) => node.props?.['data-generic-tool-card'] !== undefined)
+  assert.notEqual(bareRow, undefined, 'the row still renders when the owner omits the hook')
 })
 
 test('卡片：没有通用行导出时降级——摘要与结果仍然可见', async (t) => {
