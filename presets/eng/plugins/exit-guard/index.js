@@ -65,8 +65,7 @@ function buildMessage(children, jobs) {
     role: 'user',
     content: [{ type: 'text', text }],
     source: {
-      kind: 'plugin',
-      plugin: 'eng-exit-guard',
+      kind: 'plugin:eng-exit-guard',
       form: 'notice',
       summary: `运行中的后台工作阻止回合结束（子代理 ${children.length}，后台任务 ${jobs.length}）`,
     },
