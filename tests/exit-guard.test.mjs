@@ -74,8 +74,7 @@ test('有运行中子代理 → steer 一次，消息含清单与工具指引', 
     assert.equal(steered.length, 1)
     const [message] = steered
     assert.equal(message.role, 'user')
-    assert.equal(message.source.kind, 'plugin')
-    assert.equal(message.source.plugin, 'eng-exit-guard')
+    assert.equal(message.source.kind, 'plugin:eng-exit-guard')
     assert.equal(typeof message.id, 'string')
     const text = message.content[0].text
     assert.match(text, /child-1/)

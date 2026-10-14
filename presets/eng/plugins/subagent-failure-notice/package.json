@@ -1,0 +1,7 @@
+{
+  "name": "dsh-preset-eng-subagent-failure-notice",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "version": "0.1.0"
+}
